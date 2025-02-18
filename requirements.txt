@@ -1,1 +1,2 @@
 rectangle-packer
+pyyaml

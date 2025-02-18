@@ -1,3 +1,4 @@
+import os.path
 from itertools import chain, combinations
 
 import numpy as np
@@ -6,13 +7,6 @@ from kikit.panelize import Panel, expandRect, findBoardBoundingBox, pcbnew, Orig
 from kikit.plugin import LayoutPlugin
 from kikit.units import mm
 from rpack import pack, packing_density, PackingImpossibleError
-
-input_boards = [
-    dict(pcb='Fugu2.kicad_pcb', count=1),
-    dict(pcb='psu/buck100.kicad_pcb', count=5),
-    dict(pcb='../hw/precision-current-sensor/precision-current-sensor.kicad_pcb', count=1),
-    dict(pcb='mcu-head/Fugu2-esp32s3-wroom-head.kicad_pcb', count=2),
-]
 
 
 def powerset(iterable):
@@ -50,9 +44,14 @@ class Plugin(LayoutPlugin):
     def buildLayout(self, panel: Panel, mainInputFile: str, _sourceArea):
         layout = self.preset["layout"]
 
-        # boards = layout.get("boards", None)
-        # if not boards:
-        #    raise RuntimeError("Specify the boards and counts like this: --layout '...; boards: board_a.kicad_pcb, 3*board_b.kicad_pcb'")
+        input_yaml:str = layout.get("input", "")
+        if not input_yaml:
+            raise RuntimeError("Specify the yaml input file like this: --layout '...; input: boards.yaml'")
+
+        import yaml
+        with open(input_yaml, 'r') as file:
+            input_boards = yaml.safe_load(file)
+        print(input_boards)
 
         panel.sourcePaths.add(mainInputFile)
 
@@ -65,13 +64,20 @@ class Plugin(LayoutPlugin):
         boards = []
         filenames = []
         for d in input_boards:
-            filename = d['pcb']
-            count = int(d.get('count', 1))
+            filename = d['board']
+            rotate_deg = float(d.get('rotate', 0))
+            count = int(d.get('qty', 1))
             assert count > 0
+
+            margin = float(d.get('margin_mm', 1)) * mm
+
+            if not os.path.isabs(filename):
+                filename = os.path.join(os.path.dirname(input_yaml), filename)
 
             board = pcbnew.LoadBoard(filename)
 
-            bbox = expandRect(findBoardBoundingBox(board), 0.5 * mm)
+
+            bbox = expandRect(findBoardBoundingBox(board), margin)
 
             assert (bbox.GetWidth() + self.hspace) % S == 0, (bbox.GetWidth() + self.hspace, S)
             assert (bbox.GetHeight() + self.vspace) % S == 0, (bbox.GetWidth() + self.vspace, S)
@@ -96,9 +102,11 @@ class Plugin(LayoutPlugin):
                 sourceArea=expandRect(findBoardBoundingBox(boards[i]), 1 * mm),
                 netRenamer=netRenamer,
                 refRenamer=refRenamer,
-                rotationAngle=self.rotation + pcbnew.EDA_ANGLE(90 if best_rotates[i] else 0, pcbnew.DEGREES_T),
+                rotationAngle=self.rotation + pcbnew.EDA_ANGLE((90 if best_rotates[i] else 0), pcbnew.DEGREES_T),
                 inheritDrc=False,
             )
+
+        print('Done.')
 
         return panel.substrates
 
