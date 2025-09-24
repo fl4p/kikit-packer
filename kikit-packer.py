@@ -59,13 +59,14 @@ class Plugin(LayoutPlugin):
         refRenamer = lambda n, orig: self.refPattern.format(n=n, orig=orig)
 
         S = int(layout.get("eps", 1))  # scale extents for better numerical stability, not sure if necessary
+        assert S > 0, "eps must be a positive integer"
 
         sizes = []
         boards = []
         filenames = []
         for d in input_boards:
             filename = d['board']
-            rotate_deg = float(d.get('rotate', 0))
+            rotate_deg = float(d.get('rotate', 0))  # pre-rotate TODO
             count = int(d.get('qty', 1))
             assert count > 0, "Count must be > 0"
 

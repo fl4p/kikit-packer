@@ -1,0 +1,5 @@
+- board: main.kicad_pcb
+  qty: 1
+  margin_mm: 2      # default = 1
+- board: long.kicad_pcb
+  qty: 4
