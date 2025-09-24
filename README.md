@@ -21,7 +21,7 @@ Requirements:
 * [KiKit](https://yaqwsx.github.io/KiKit/latest/installation/intro/)
 
 ```
-git clone ...
+git clone https://github.com/fl4p/kikit-packer
 ```
 
 Create a yaml file listing all your boards you want to combine and how many copies you need:
@@ -30,7 +30,7 @@ Create a yaml file listing all your boards you want to combine and how many copi
 - board: debug-probe/debug-probe.kicad_pcb
   qty: 1
   margin_mm: 2      # default = 1
-- board: sensor.kicad_pcb
+- board: sensor/sensor.kicad_pcb
   qty: 4
 ```
 
@@ -41,7 +41,7 @@ Then run kikit from shell:
 
 ```shell
 kikit panelize \
-  --layout 'plugin; code: kikit-packer.py.Plugin; input:probe-and-4sensors.yaml' \
+  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; input:probe-and-4sensors.yaml' \
     --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
     --cuts 'mousebites' \
     --post 'millradius: 1mm' \
