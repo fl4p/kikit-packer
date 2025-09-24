@@ -27,7 +27,7 @@ def optimal_pack(sizes, max_width=None, max_height=None):
         except PackingImpossibleError:
             continue
         density = packing_density(sizes_with_rotations, positions)
-        assert density <= 1.0
+        assert density <= 1.0, "unexpected packing density > 1"
         rotate = [(i in rotated_sizes_indices) for (i, _) in enumerate(sizes_with_rotations)]
         rotated_area = sum(np.array(rotate) * np.array(list(w * h for w, h in sizes)))
 
@@ -44,7 +44,7 @@ class Plugin(LayoutPlugin):
     def buildLayout(self, panel: Panel, mainInputFile: str, _sourceArea):
         layout = self.preset["layout"]
 
-        input_yaml:str = layout.get("input", "")
+        input_yaml: str = layout.get("input", "")
         if not input_yaml:
             raise RuntimeError("Specify the yaml input file like this: --layout '...; input: boards.yaml'")
 
@@ -67,20 +67,26 @@ class Plugin(LayoutPlugin):
             filename = d['board']
             rotate_deg = float(d.get('rotate', 0))
             count = int(d.get('qty', 1))
-            assert count > 0
+            assert count > 0, "Count must be > 0"
 
             margin = float(d.get('margin_mm', 1)) * mm
 
             if not os.path.isabs(filename):
                 filename = os.path.join(os.path.dirname(input_yaml), filename)
 
-            board = pcbnew.LoadBoard(filename)
+            filename = os.path.realpath(filename)
 
+            if not os.path.isfile(filename):
+                raise RuntimeError("File '{}' does not exist".format(filename))
+
+            board = pcbnew.LoadBoard(filename)
 
             bbox = expandRect(findBoardBoundingBox(board), margin)
 
-            assert (bbox.GetWidth() + self.hspace) % S == 0, (bbox.GetWidth() + self.hspace, S)
-            assert (bbox.GetHeight() + self.vspace) % S == 0, (bbox.GetWidth() + self.vspace, S)
+            assert (bbox.GetWidth() + self.hspace) % S == 0, (
+                f"Board width+hspace ({bbox.GetWidth()}+{self.hspace}) is not multiple of {S}")
+            assert (bbox.GetHeight() + self.vspace) % S == 0, (
+                f"Board height+vspace ({bbox.GetHeight()}+{self.vspace}) is not multiple of {S}")
 
             sizes.extend([(
                 int((bbox.GetWidth() + self.hspace) / S),
