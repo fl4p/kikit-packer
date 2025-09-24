@@ -58,7 +58,7 @@ class Plugin(LayoutPlugin):
         netRenamer = lambda n, orig: self.netPattern.format(n=n, orig=orig)
         refRenamer = lambda n, orig: self.refPattern.format(n=n, orig=orig)
 
-        S = int(1e3)  # scale extents for better numerical stability, not sure if necessary
+        S = int(layout.get("eps", 1))  # scale extents for better numerical stability, not sure if necessary
 
         sizes = []
         boards = []
