@@ -64,6 +64,7 @@ class Plugin(LayoutPlugin):
         netRenamer = lambda n, orig: self.netPattern.format(n=n, orig=orig)
         refRenamer = lambda n, orig: self.refPattern.format(n=n, orig=orig)
 
+        # TODO use math.gcd
         S = int(layout.get("eps", 1))  # scale extents for better numerical stability, not sure if necessary
         assert S > 0, "eps must be a positive integer"
 
