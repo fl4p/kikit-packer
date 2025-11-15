@@ -27,11 +27,12 @@ git clone https://github.com/fl4p/kikit-packer
 Create a yaml file listing all your boards you want to combine and how many copies you need:
 
 ```yaml
-- board: debug-probe/debug-probe.kicad_pcb
-  qty: 1
-  margin_mm: 2      # default = 1
-- board: sensor/sensor.kicad_pcb
-  qty: 4
+boards:
+  - board: debug-probe/debug-probe.kicad_pcb
+    qty: 1
+    margin_mm: 2      # default = 1
+  - board: sensor/sensor.kicad_pcb
+    qty: 4
 ```
 
 Here we name this file `probe-and-4sensors.yaml`.
