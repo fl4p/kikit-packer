@@ -1,6 +1,6 @@
 # KiKit Packer
 
-Merge multiple boards into a single file with minimum area to reduce costs when ordering with your PCB manufacturer.
+Merge multiple boards into a single file (panel) with minimum area to reduce costs when ordering with your PCB manufacturer.
 
 * Works with rectangular shaped boards
 * based on [rectangle-packer](https://github.com/Penlect/rectangle-packer)
