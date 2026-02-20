@@ -7,23 +7,61 @@ Merge multiple boards into a single file with minimum area to reduce costs when 
 * finds maximum density packing by offset and 90° rotation
 * applies penalty for rotation (prefer layouts with least rotated area)
 
-# Example Output
+## Example Output
 
-![img.png](example.webp)
+<img src="example.webp" width="300"/>
 
-Input: 2x MCU head + 5x PSU for [Fugu2](https://github.com/fl4p/Fugu2) solar charger
+Input: 2x MCU head + 5x PSU for [Fugu2](https://github.com/fl4p/Fugu2) solar charger. Please ignore
+the [vcuts](https://github.com/fl4p/kikit-packer/issues/1) here.
 
-## How to use
+## Setup
 
-Requirements:
+You need to have KiCad with [KiKit](https://yaqwsx.github.io/KiKit/latest/installation/intro/) plugin installed.
 
-* KiCad
-* [KiKit](https://yaqwsx.github.io/KiKit/latest/installation/intro/)
+Clone this repository into a folder (e.g. `~/dev/`)
 
 ```
 git clone https://github.com/fl4p/kikit-packer
+cd kikit-packer
 ```
 
+Then install the requirements, according to one of the following sections for macOS, Linux and Windows:
+
+
+### Install dependencies (macOS)
+
+Create a new virtual environment based on the KiCad one and install requirements:
+
+```
+PYTHON=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
+${PYTHON} -m venv --system-site-packages venv-ki
+./venv-ki/bin/pip3 install -r requirements.txt
+```
+
+### Install dependencies (Linux)
+
+Test if you can import `pcbwnew`:
+
+```
+python3 -c "import pcbnew; print(pcbnew._pcbnew)"
+```
+
+Create a new virtual environment:
+
+```
+PYTHON=python3
+${PYTHON} -m venv --system-site-packages venv
+./venv/bin/pip3 install -r requirements.txt
+```
+
+### Install dependencies (Windows)
+
+```
+"C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install -r requirements.txt
+```
+
+
+## How to use
 Create a yaml file listing all your boards you want to combine and how many copies you need:
 
 ```yaml
@@ -53,37 +91,6 @@ the current working directory. Usually the main board file name is one of the th
 Or you can set this to an empty reference board that contains all the design constraints for your PCB manufacturer.
 The output board will have the same board setup (DRC etc.) as the main board file.
 
-## Install (macOS)
-
-Create a new virtual environment based on the KiCad one and install requirements:
-
-```
-PYTHON=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
-${PYTHON} -m venv --system-site-packages venv-ki
-./venv-ki/bin/pip3 install -r requirements.txt
-```
-
-## Install (Linux)
-
-Test if you can import `pcbwnew`:
-
-```
-python3 -c "import pcbnew; print(pcbnew._pcbnew)"
-```
-
-Create a new virtual environment:
-
-```
-PYTHON=python3
-${PYTHON} -m venv --system-site-packages venv
-./venv/bin/pip3 install -r requirements.txt
-```
-
-## Install (Windows)
-
-```
-"C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install -r requirements.txt
-```
 
 
 
