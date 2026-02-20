@@ -1,6 +1,6 @@
 # KiKit Packer
 
-Merge multiple boards into a single file with minimum area to reduce costs when ordering with your PCB manufacturer.
+Merge multiple boards into a single file (panel) with minimum area to reduce costs when ordering with your PCB manufacturer.
 
 * Works with rectangular shaped boards
 * based on [rectangle-packer](https://github.com/Penlect/rectangle-packer)
@@ -65,11 +65,12 @@ ${PYTHON} -m venv --system-site-packages venv
 Create a yaml file listing all your boards you want to combine and how many copies you need:
 
 ```yaml
-- board: debug-probe/debug-probe.kicad_pcb
-  qty: 1
-  margin_mm: 2      # default = 1
-- board: sensor/sensor.kicad_pcb
-  qty: 4
+boards:
+  - board: debug-probe/debug-probe.kicad_pcb
+    qty: 1
+    margin_mm: 2      # default = 1
+  - board: sensor/sensor.kicad_pcb
+    qty: 4
 ```
 
 Here we name this file `probe-and-4sensors.yaml`.
