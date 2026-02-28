@@ -118,6 +118,7 @@ class Plugin(LayoutPlugin):
                 refRenamer=refRenamer,
                 rotationAngle=self.rotation + pcbnew.EDA_ANGLE((90 if best_rotates[i] else 0), pcbnew.DEGREES_T),
                 inheritDrc=False,
+                bakeText=True,
             )
 
         print('Done.')
