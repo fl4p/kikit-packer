@@ -104,7 +104,9 @@ class Plugin(LayoutPlugin):
             boards.extend([board] * count)
             filenames.extend([filename] * count)
 
-        best_rotates, best_positions = optimal_pack(sizes, max_width=max_width, max_height=max_height)
+        pack_max_w = -(-int(max_width) // S) if max_width is not None else None
+        pack_max_h = -(-int(max_height) // S) if max_height is not None else None
+        best_rotates, best_positions = optimal_pack(sizes, max_width=pack_max_w, max_height=pack_max_h)
 
         print(best_rotates, best_positions)
 
