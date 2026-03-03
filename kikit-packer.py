@@ -91,14 +91,9 @@ class Plugin(LayoutPlugin):
 
             bbox = expandRect(findBoardBoundingBox(board), margin)
 
-            assert (bbox.GetWidth() + self.hspace) % S == 0, (
-                f"Board width+hspace ({bbox.GetWidth()}+{self.hspace}) is not multiple of {S}")
-            assert (bbox.GetHeight() + self.vspace) % S == 0, (
-                f"Board height+vspace ({bbox.GetHeight()}+{self.vspace}) is not multiple of {S}")
-
             sizes.extend([(
-                int((bbox.GetWidth() + self.hspace) / S),
-                int((bbox.GetHeight() + self.vspace) / S)
+                -(-int(bbox.GetWidth() + self.hspace) // S),
+                -(-int(bbox.GetHeight() + self.vspace) // S)
             )] * count)
 
             boards.extend([board] * count)
