@@ -1,8 +1,12 @@
 
 venv/
 .idea/
+.pi-subagents/
 
 __pycache__/
+build/
+dist/
+*.egg-info/
 
 fp-info-cache
 
@@ -17,3 +21,7 @@ fp-info-cache
 venv-ki/bin/
 
 venv-ki/
+
+!tests/fixtures/**/*.kicad_pcb
+!tests/fixtures/**/*.kicad_pro
+!tests/fixtures/**/*.kicad_dru

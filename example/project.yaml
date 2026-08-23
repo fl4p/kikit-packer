@@ -1,0 +1,33 @@
+version: 1
+panel:
+  authority:
+    board: main.kicad_pcb
+    reference_only: false
+  output: combined.kicad_pcb
+  max_width_mm: 100
+  max_height_mm: 1000
+  tabs:
+    mode: fixed
+    width_mm: 2
+    horizontal_count: 1
+    vertical_count: 1
+    min_distance_mm: 0
+  cuts:
+    mode: mousebites
+    drill_mm: 0.5
+    spacing_mm: 0.8
+    offset_mm: 0
+    prolong_mm: 0
+  post:
+    mill_radius_mm: 1
+    # These synthetic edge-poured boards intentionally change on a merged-panel refill.
+    verify_refill_areas: false
+  allow_mixed_layers: false
+  allow_mixed_thickness: false
+boards:
+  - board: main.kicad_pcb
+    qty: 1
+    margin_mm: 2
+  - board: long.kicad_pcb
+    qty: 4
+    margin_mm: 1

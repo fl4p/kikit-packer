@@ -1,102 +1,176 @@
 # KiKit Packer
 
-Merge multiple boards into a single file (panel) with minimum area to reduce costs when ordering with your PCB manufacturer.
+KiKit Packer combines multiple KiCad boards into a compact panel using KiKit and rectangle-packer.
+It provides a versioned project format, a concise CLI, a wxPython desktop UI, immutable source
+snapshots, output verification, and rollback-safe project promotion.
 
-* Works with rectangular shaped boards
-* based on [rectangle-packer](https://github.com/Penlect/rectangle-packer)
-* finds maximum density packing by offset and 90° rotation
-* applies penalty for rotation (prefer layouts with least rotated area)
+## Requirements
 
-## Example Output
+- KiCad 10.x with its Python `pcbnew` and wxPython modules
+- KiKit 1.8.x
+- Python 3.9 or newer from the KiCad-compatible runtime
 
-<img src="example.webp" width="300"/>
+The currently tested development environment is macOS arm64 with KiCad 10.0.5 and KiKit 1.8.1.
+Other platform/version combinations remain provisional until their release smoke tests pass.
 
-Input: 2x MCU head + 5x PSU for [Fugu2](https://github.com/fl4p/Fugu2) solar charger. Please ignore
-the [vcuts](https://github.com/fl4p/kikit-packer/issues/1) here.
+## Install from a source checkout
 
-## Setup
+The tested macOS arm64/Python 3.9 bootstrap discovers KiCad's Python, creates a user-local
+environment with `--system-site-packages`, installs a complete hash-locked dependency set without
+build isolation, runs `doctor`, and creates `~/.local/bin/kikit-packer`:
 
-You need to have KiCad with [KiKit](https://yaqwsx.github.io/KiKit/latest/installation/intro/) plugin installed.
-
-Clone this repository into a folder (e.g. `~/dev/`)
-
-```
-git clone https://github.com/fl4p/kikit-packer
-cd kikit-packer
+```sh
+./installer/install-macos.sh
 ```
 
-Then install the requirements, according to one of the following sections for macOS, Linux and Windows:
+A local source directory is treated as trusted development input. Release wheel installation also
+requires its published SHA-256:
 
-
-### Install dependencies (macOS)
-
-Create a new virtual environment based on the KiCad one and install requirements:
-
-```
-PYTHON=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
-${PYTHON} -m venv --system-site-packages venv-ki
-./venv-ki/bin/pip3 install -r requirements.txt
+```sh
+./installer/install-macos.sh --source dist/kikit_packer-0.1.0-py3-none-any.whl \
+  --source-sha256 SHA256_FROM_RELEASE
 ```
 
-### Install dependencies (Linux)
+`install-linux.sh` and `install-windows.ps1` deliberately fail closed until platform-specific,
+hash-locked dependency sets pass their release gates. They are bootstrap entry points, not claims
+of current platform support. No administrator privileges are required. The installer reports when
+`~/.local/bin` is not on `PATH`. You can also use the existing development environment directly:
 
-Test if you can import `pcbwnew`:
-
-```
-python3 -c "import pcbnew; print(pcbnew._pcbnew)"
-```
-
-Create a new virtual environment:
-
-```
-PYTHON=python3
-${PYTHON} -m venv --system-site-packages venv
-./venv/bin/pip3 install -r requirements.txt
+```sh
+./venv-ki/bin/python -m kikit_packer doctor
 ```
 
-### Install dependencies (Windows)
-
-```
-"C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install -r requirements.txt
-```
-
-
-## How to use
-Create a yaml file listing all your boards you want to combine and how many copies you need:
+## Project format
 
 ```yaml
+version: 1
+panel:
+  authority:
+    board: main.kicad_pcb
+    reference_only: false
+  output: combined.kicad_pcb
+  max_width_mm: 100
+  max_height_mm: 1000
+  tabs:
+    mode: flat-edge
+    width_mm: 2
+  cuts:
+    mode: none
+    drill_mm: 0.5
+    spacing_mm: 0.8
+    offset_mm: 0
+    prolong_mm: 0
+  post:
+    mill_radius_mm: 1
+    verify_refill_areas: true
+  allow_mixed_layers: false
+  allow_mixed_thickness: false
 boards:
-  - board: debug-probe/debug-probe.kicad_pcb
+  - board: main.kicad_pcb
     qty: 1
-    margin_mm: 2      # default = 1
-  - board: sensor/sensor.kicad_pcb
+    margin_mm: 2
+  - board: long.kicad_pcb
     qty: 4
+    margin_mm: 1
 ```
 
-Here we name this file `probe-and-4sensors.yaml`.
-File names in the `.yaml` file are relative to the folder where the `.yaml` is stored.
+Project-relative paths resolve from the YAML directory. The authority supplies the final panel
+layer set, thickness, and board setup. Set `reference_only: true` for an unplaced authority board.
+A lower-layer authority is rejected. Mixed layer sets or thicknesses require their explicit
+acknowledgements; incompatible explicit stackups are rejected.
 
-Then run kikit from shell:
+`margin_mm` is packing padding retained for compatibility, not a guaranteed pairwise clearance.
+The default cut mode is `none`; mousebite drilling is an explicit choice.
 
-```shell
+## CLI
+
+Generate and optionally open a panel:
+
+```sh
+kikit-packer pack project.yaml
+kikit-packer pack project.yaml --output other.kicad_pcb --open
+```
+
+Legacy YAML requires an explicit authority:
+
+```sh
+kikit-packer pack example/merge.yaml \
+  --main example/main.kicad_pcb \
+  --output combined.kicad_pcb
+```
+
+A successful run promotes this managed artifact set together:
+
+```text
+combined.kicad_pcb
+combined.kicad_pro        # when produced
+combined.kicad_dru        # when produced
+combined.kicad_pcb.panel.json
+```
+
+Generation uses read-only snapshots and a nonce-bound plan. Before promotion, the KiCad child
+refills every zone on a temporary board copy and requires each zone-layer copper area to remain
+exactly unchanged. This audit never modifies the staged output. Set `post.verify_refill_areas` to
+`false` only for a reviewed panel whose removed source-board edges intentionally change a refill;
+the skipped audit is recorded in the manifest. Failure, cancellation, verification errors, and
+KiCad locks preserve the prior managed artifact set.
+
+Diagnose runtime problems:
+
+```sh
+kikit-packer doctor
+kikit-packer doctor project.yaml --json
+```
+
+## Desktop UI
+
+```sh
+kikit-packer gui [project.yaml]
+```
+
+The UI edits board rows and panel settings, validates and previews the immutable packing plan,
+generates in a worker, supports cancellation, and opens the promoted board in KiCad.
+
+## Legacy raw KiKit plugin
+
+Path-loaded usage remains supported from a source checkout; installing the package is not required
+for this command:
+
+```sh
+cd example
 kikit panelize \
-  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; input:probe-and-4sensors.yaml' \
-    --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
-    --cuts 'mousebites' \
-    --post 'millradius: 1mm' \
-  sensor.kicad_pcb combined.kicad_pcb
+  --layout 'plugin; code: ../kikit-packer.py.Plugin; input:merge.yaml' \
+  --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
+  --cuts 'mousebites' \
+  --post 'millradiusouter: 1mm' \
+  main.kicad_pcb combined.kicad_pcb
 ```
 
-The main board command line argument (`sensor.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
-the current working directory. Usually the main board file name is one of the the boards from the `.yaml`.
-Or you can set this to an empty reference board that contains all the design constraints for your PCB manufacturer.
-The output board will have the same board setup (DRC etc.) as the main board file.
+Legacy raw mode preserves KiKit's externally supplied tab, cut, post, rotation, and companion-file
+behavior, but it does not run the temporary refill-area audit or atomic promotion checks. Use the
+packaged `pack` command for those guards. The root `kikit-packer.py` file is only a checkout-relative
+compatibility bootstrap; panel logic lives in `kikit_packer`.
 
+## Uninstall
 
+The installer prints its install root. Preview receipt-bounded removal first:
 
+```sh
+python3 installer/uninstall.py --root "$HOME/Library/Application Support/KiKit Packer"
+```
 
+Add `--yes` to remove only the receipt-recorded launchers and current or retained version
+environments. A modified launcher or receipt aborts before any removal. User YAML files, generated
+panels, and KiCad itself are never removed.
 
+## Development
 
+```sh
+ruff check kikit_packer installer tests
+pyright --project pyrightconfig.json
+./venv-ki/bin/python -m pytest
+./venv-ki/bin/python -m kikit_packer pack /path/to/project.yaml
+```
 
-
-
+`IMPLEMENTATION-PLAN.md` documents the run protocol, verification boundary, artifact transaction,
+platform gates, and remaining release-hardening work.

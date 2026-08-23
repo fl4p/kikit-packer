@@ -1,7 +1,14 @@
-This example includes a main board `main.kicad_pcb` and a smaller board `long.kicad_pcb`.
+This example combines one `main.kicad_pcb` and four `long.kicad_pcb` boards.
 
-We want to order 1x main and 4x long with our PCB manufacturer.
-This is defined in  `merge.yaml`, where both board files are referenced.
+The versioned project is `project.yaml`:
 
-Now we need to run `kikat` with `kikat-packer` as a plugin-in. See `panelize.sh` (Linux & macOS) or `panelize.bat` (
-Windows) to see how to execute the `kikat` command.
+```sh
+kikit-packer pack project.yaml
+```
+
+Its synthetic zones pour to source-board edges and intentionally change when those edges become
+panel tabs, so this fixture explicitly skips the refill-area audit. Production projects should
+leave `post.verify_refill_areas` enabled.
+
+`merge.yaml`, `panelize.sh`, and `panelize.bat` remain legacy compatibility examples that invoke the
+path-loaded KiKit plugin directly.
