@@ -17,6 +17,7 @@ def box_from_bounds(bounds):
 def append_compatibility(panel, source_board) -> Iterator[None]:
     authority_thickness = panel.board.GetDesignSettings().GetBoardThickness()
     authority_layers = panel.board.GetCopperLayerCount()
+    authority_enabled = panel.board.GetEnabledLayers()
     source_thickness = source_board.GetDesignSettings().GetBoardThickness()
     source_layers = source_board.GetCopperLayerCount()
     panel.board.GetDesignSettings().SetBoardThickness(source_thickness)
@@ -27,6 +28,7 @@ def append_compatibility(panel, source_board) -> Iterator[None]:
         panel.board.GetDesignSettings().SetBoardThickness(authority_thickness)
         panel.copperLayerCount = authority_layers
         panel.setCopperLayers(authority_layers)
+        panel.board.SetEnabledLayers(authority_enabled)
 
 
 def inherit_reference_authority_rules(panel, authority_board) -> None:
@@ -38,9 +40,18 @@ def inherit_reference_authority_rules(panel, authority_board) -> None:
 
 
 def assert_authority(panel, expected: dict[str, Any]) -> None:
+    import pcbnew
+
     actual_layers = panel.board.GetCopperLayerCount()
+    actual_layer_names = [
+        panel.board.GetLayerName(layer)
+        for layer in panel.board.GetEnabledLayers().CuStack()
+        if pcbnew.IsCopperLayer(layer)
+    ]
     actual_thickness = panel.board.GetDesignSettings().GetBoardThickness()
     if actual_layers != int(expected["copper_layer_count"]):
         raise RuntimeError("panel copper-layer count changed during append")
+    if actual_layer_names != expected["copper_layers"]:
+        raise RuntimeError("panel enabled copper-layer mask changed during append")
     if actual_thickness != int(expected["thickness_iu"]):
         raise RuntimeError("panel thickness changed during append")

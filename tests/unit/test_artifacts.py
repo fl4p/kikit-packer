@@ -71,6 +71,36 @@ def test_promotion_failure_restores_old_output(tmp_path: Path, monkeypatch):
     assert final.read_bytes() == b"old"
 
 
+@pytest.mark.parametrize("target", ["backup", "transaction-lock"])
+def test_post_commit_cleanup_failure_does_not_report_failed_promotion(
+    tmp_path: Path, monkeypatch, target: str
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    staged = staging / "panel.kicad_pcb"
+    staged.write_bytes(b"new")
+    manifest_path(staged).write_bytes(b"new manifest")
+    final = tmp_path / "panel.kicad_pcb"
+    final.write_bytes(b"old")
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        is_target = (
+            target == "backup" and ".backup-" in str(path.parent)
+        ) or (
+            target == "transaction-lock" and path.name.endswith(".kikit-packer.lock")
+        )
+        if is_target:
+            raise PermissionError("injected cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    promoted = promote(staged, final)
+    assert final in promoted
+    assert final.read_bytes() == b"new"
+    assert manifest_path(final).read_bytes() == b"new manifest"
+
+
 def test_missing_manifest_preserves_old_output(tmp_path: Path):
     staging = tmp_path / "staging"
     staging.mkdir()

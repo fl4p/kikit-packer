@@ -43,13 +43,15 @@ def transaction_lock(board: Path) -> Iterator[None]:
     except FileExistsError:
         raise ArtifactError("another KiKit Packer transaction is active")
     try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.close(descriptor)
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+        finally:
+            os.close(descriptor)
         yield
     finally:
         try:
             lock.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
 
 
@@ -105,22 +107,44 @@ def promote(staging_board: Path, final_board: Path) -> tuple[Path, ...]:
                 with path.open("rb") as handle:
                     os.fsync(handle.fileno())
             _fsync_directory(final_board.parent)
-        except BaseException:
-            for path in reversed(moved_new):
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
+        except BaseException as promotion_error:
+            rollback_errors = []
+            old_destinations = {destination for destination, _ in moved_old}
             for destination, backup in reversed(moved_old):
-                if backup.exists():
-                    os.replace(str(backup), str(destination))
-            _fsync_directory(final_board.parent)
+                try:
+                    if backup.exists():
+                        os.replace(str(backup), str(destination))
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            for path in reversed(moved_new):
+                if path in old_destinations:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    rollback_errors.append(exc)
+            try:
+                _fsync_directory(final_board.parent)
+            except OSError as exc:
+                rollback_errors.append(exc)
+            if rollback_errors:
+                details = "; ".join(str(error) for error in rollback_errors)
+                raise ArtifactError(f"promotion failed and rollback was incomplete: {details}") from promotion_error
             raise
         else:
             for _, backup in moved_old:
-                backup.unlink()
-            backup_root.rmdir()
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
+            try:
+                backup_root.rmdir()
+            except OSError:
+                pass
             return tuple(path for path in final if path.exists())
         finally:
-            if backup_root.exists() and not any(backup_root.iterdir()):
-                backup_root.rmdir()
+            try:
+                if backup_root.exists() and not any(backup_root.iterdir()):
+                    backup_root.rmdir()
+            except OSError:
+                pass

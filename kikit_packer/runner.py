@@ -5,6 +5,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Any
 
 from .artifacts import ArtifactError, manifest_path, promote
 from .command import child_argv
+from .companions import project_authority_profile
 from .fingerprint import source_copy_profile
 from .inspect import inspect_board, validate_authority
 from .manifest import build_manifest
@@ -162,6 +165,7 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
             copy_profiles[source.source_id] = source_copy_profile(
                 source_board,
                 [left - IU_PER_MM, top - IU_PER_MM, right + IU_PER_MM, bottom + IU_PER_MM],
+                inspection.outline_bounds_iu,
             )
         authority_source = by_original[project.panel.authority.board.resolve()]
         authority_inspection = inspections[authority_source.source_id]
@@ -245,9 +249,16 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
             "copper_layer_count": authority_inspection.copper_layer_count,
             "copper_layers": list(authority_inspection.copper_layers),
             "thickness_iu": authority_inspection.thickness_iu,
+            "setup_sha256": authority_inspection.setup_sha256,
             "stackup": authority_inspection.stackup,
             "companions": {
-                "kicad_pro": {"present": authority_source.kicad_pro is not None, "sha256": None if authority_source.kicad_pro is None else authority_source.kicad_pro.sha256},
+                "kicad_pro": {
+                    "present": authority_source.kicad_pro is not None,
+                    "sha256": None if authority_source.kicad_pro is None else authority_source.kicad_pro.sha256,
+                    "authority_profile": None
+                    if authority_source.kicad_pro is None
+                    else project_authority_profile(root / authority_source.kicad_pro.relative),
+                },
                 "kicad_dru": {"present": authority_source.kicad_dru is not None, "sha256": None if authority_source.kicad_dru is None else authority_source.kicad_dru.sha256},
             },
         }
@@ -261,13 +272,24 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
         ]
         digest_input = {
             "version": project.version,
-            "settings": settings,
+            "settings": {
+                key: settings[key]
+                for key in (
+                    "layout",
+                    "tabs",
+                    "cuts",
+                    "post",
+                    "page",
+                    "allow_mixed_layers",
+                    "allow_mixed_thickness",
+                )
+            },
             "rows": row_identities,
             "sources": [(item["source_id"], item["sha256"]) for item in sources],
             "authority": authority,
-            "output": str(output),
             "max_width_iu": max_width,
             "max_height_iu": max_height,
+            "candidate_limit": candidate_limit,
         }
         plan = {
             "kind": "kikit-packer.run-plan",
@@ -291,6 +313,7 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
                 "project": settings,
                 "kikit_raw_preset": {},
                 "kikit_raw_preset_digest": "0" * 64,
+                "kikit_processed_preset_digest": "0" * 64,
             },
             "diagnostics": (
                 [diagnostic.to_dict() for inspection in inspections.values() for diagnostic in inspection.diagnostics]
@@ -298,11 +321,16 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
                 + [diagnostic.to_dict() for diagnostic in project.diagnostics]
             ),
         }
-        from .plugin_child import _raw_overrides
+        from .plugin_child import complete_raw_preset
 
-        raw_preset = _raw_overrides(plan, root / "run-contract.json")
+        raw_preset = complete_raw_preset(plan)
+        raw_preset_digest = digest(raw_preset)
         plan["resolved_settings"]["kikit_raw_preset"] = raw_preset
-        plan["resolved_settings"]["kikit_raw_preset_digest"] = digest(raw_preset)
+        plan["resolved_settings"]["kikit_raw_preset_digest"] = raw_preset_digest
+        plan["resolved_settings"]["kikit_processed_preset_digest"] = raw_preset_digest
+        digest_input["kikit_raw_preset"] = raw_preset
+        digest_input["kikit_processed_preset_digest"] = raw_preset_digest
+        plan["project_digest"] = digest(digest_input)
         plan_path = root / "run-plan.json"
         atomic_write_json(plan_path, plan)
         staged_output = Path("artifacts") / output.name
@@ -332,10 +360,101 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
         raise
 
 
-def _terminate_process_tree(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
+class _TailBuffer:
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.data = bytearray()
+
+    def append(self, chunk: bytes) -> None:
+        self.data.extend(chunk)
+        if len(self.data) > self.limit:
+            del self.data[: len(self.data) - self.limit]
+
+    def text(self) -> str:
+        return bytes(self.data).decode("utf-8", errors="replace")
+
+
+def _drain(stream, buffer: _TailBuffer) -> None:
+    for chunk in iter(lambda: stream.read(65536), b""):
+        buffer.append(chunk)
+
+
+def _windows_kill_job(process: subprocess.Popen):
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    limits = ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = 0x00002000
+    if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        kernel.CloseHandle(job)
+        raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+    if not kernel.AssignProcessToJobObject(job, wintypes.HANDLE(process._handle)):
+        kernel.CloseHandle(job)
+        raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+    return job
+
+
+def _close_windows_job(job) -> None:
+    if job is not None:
+        import ctypes
+
+        getattr(ctypes, "WinDLL")("kernel32", use_last_error=True).CloseHandle(job)
+
+
+def _process_group_exists(process: subprocess.Popen) -> bool:
     if os.name == "nt":
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _terminate_process_tree(process: subprocess.Popen, windows_job=None) -> None:
+    if os.name == "nt" and windows_job is not None:
+        _close_windows_job(windows_job)
+    elif os.name == "nt":
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             stdout=subprocess.DEVNULL,
@@ -343,18 +462,39 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
             check=False,
         )
     else:
-        os.killpg(process.pid, signal.SIGTERM)
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 3
+    while _process_group_exists(process) and time.monotonic() < deadline:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(0.05)
+    if _process_group_exists(process):
         if os.name == "nt":
             process.kill()
         else:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if process.poll() is None:
+        process.wait(timeout=3)
 
 
-def _run_child(argv, cwd: Path, environment: dict[str, str], cancel_event=None):
+def _run_child(
+    argv,
+    cwd: Path,
+    environment: dict[str, str],
+    stdout_limit: int,
+    stderr_limit: int,
+    cancel_event=None,
+):
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen(
         argv,
@@ -362,22 +502,55 @@ def _run_child(argv, cwd: Path, environment: dict[str, str], cancel_event=None):
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         start_new_session=os.name != "nt",
         creationflags=creationflags,
     )
+    windows_job = _windows_kill_job(process)
+    assert process.stdout is not None and process.stderr is not None
+    stdout = _TailBuffer(stdout_limit)
+    stderr = _TailBuffer(stderr_limit)
+    drainers = [
+        threading.Thread(target=_drain, args=(process.stdout, stdout), daemon=True),
+        threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True),
+    ]
+    for drainer in drainers:
+        drainer.start()
     try:
-        while True:
+        while process.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
-                _terminate_process_tree(process)
+                _terminate_process_tree(process, windows_job)
+                windows_job = None
                 raise RunError("generation cancelled", 130)
             try:
-                stdout, stderr = process.communicate(timeout=0.1)
-                return process.returncode, stdout[-1_048_576:], stderr[-1_048_576:]
+                process.wait(timeout=0.1)
             except subprocess.TimeoutExpired:
-                continue
+                pass
+        deadline = time.monotonic() + 0.5
+        while any(drainer.is_alive() for drainer in drainers) and time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_process_tree(process, windows_job)
+                windows_job = None
+                raise RunError("generation cancelled", 130)
+            for drainer in drainers:
+                drainer.join(timeout=0.05)
+        if any(drainer.is_alive() for drainer in drainers):
+            _terminate_process_tree(process, windows_job)
+            windows_job = None
+            for drainer in drainers:
+                drainer.join(timeout=1)
+        if any(drainer.is_alive() for drainer in drainers):
+            process.stdout.close()
+            process.stderr.close()
+            raise RunError("child output pipes did not close", 5)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunError("generation cancelled", 130)
+        _close_windows_job(windows_job)
+        windows_job = None
+        return process.returncode, stdout.text(), stderr.text()
     except BaseException:
-        _terminate_process_tree(process)
+        _terminate_process_tree(process, windows_job)
+        for drainer in drainers:
+            drainer.join(timeout=1)
         raise
 
 
@@ -397,11 +570,16 @@ def execute_prepared(
         environment["PYTHONPATH"] = package_root + (os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else "")
         _emit(root, contract, 2, "generate", "started")
         returncode, stdout, stderr = _run_child(
-            child_argv(interpreter, root / "run-contract.json"), root, environment, cancel_event
+            child_argv(interpreter, root / "run-contract.json"),
+            root,
+            environment,
+            contract["log_limits"]["stdout_bytes"],
+            contract["log_limits"]["stderr_bytes"],
+            cancel_event,
         )
         if returncode != 0:
             message = stderr[-4000:] or stdout[-4000:] or "KiKit child failed"
-            raise RunError(message.strip(), 5)
+            raise RunError(message.strip(), 130 if returncode == 130 else 5)
         _emit(root, contract, 3, "generate", "completed")
         if cancel_event is not None and cancel_event.is_set():
             raise RunError("generation cancelled", 130)

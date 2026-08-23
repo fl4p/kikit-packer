@@ -189,7 +189,9 @@ def _parse_post(raw: Any, path: str) -> PostConfig:
         mill_radius_mm=_number(data.get("mill_radius_mm", 1), path + "/mill_radius_mm", minimum=0),
         origin=origin,
         refill_zones=False,
-        verify_refill_areas=_boolean(data.get("verify_refill_areas", True), path + "/verify_refill_areas"),
+        verify_refill_areas=_boolean(
+            data.get("verify_refill_areas", False), path + "/verify_refill_areas"
+        ),
     )
 
 

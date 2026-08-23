@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from .protocol import digest
+
 _TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:\\.|[^"\\])*)"|([^\s()]+))')
 KNOWN_GLOBAL = {
     "copper_finish",
@@ -67,15 +69,33 @@ def _parse(tokens: Iterator[str]) -> list[Any]:
     return root
 
 
-def _find_stackup(value: Any) -> list[Any] | None:
+def _find_named(value: Any, name: str) -> list[Any] | None:
     if isinstance(value, list):
-        if value and value[0] == "stackup":
+        if value and value[0] == name:
             return value
         for item in value:
-            found = _find_stackup(item)
+            found = _find_named(item, name)
             if found is not None:
                 return found
     return None
+
+
+def _find_stackup(value: Any) -> list[Any] | None:
+    return _find_named(value, "stackup")
+
+
+def parse_setup_digest(path: Path) -> str:
+    tree = _parse(_tokens(path.read_text(encoding="utf-8")))
+    setup = _find_named(tree, "setup")
+    if setup is None:
+        raise StackupParseError("board has no setup section")
+    panel_owned = {"aux_axis_origin", "grid_origin"}
+    normalized = [setup[0]] + [
+        item
+        for item in setup[1:]
+        if not (isinstance(item, list) and item and item[0] in panel_owned)
+    ]
+    return digest(normalized)
 
 
 def _decimal(value: str) -> str:

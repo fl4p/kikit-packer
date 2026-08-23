@@ -33,15 +33,24 @@ def test_version_one_paths_and_defaults(tmp_path: Path):
     assert project.panel.authority.board == (tmp_path / "main.kicad_pcb").resolve()
     assert project.panel.tabs.mode == "flat-edge"
     assert project.panel.cuts.mode == "none"
-    assert project.panel.post.verify_refill_areas is True
+    assert project.panel.post.verify_refill_areas is False
 
 
-def test_refill_area_verification_can_be_explicitly_disabled(tmp_path: Path):
+def test_refill_area_verification_accepts_explicit_true(tmp_path: Path):
     (tmp_path / "main.kicad_pcb").write_text("board")
     project_file = tmp_path / "pack.yaml"
-    project_file.write_text(VALID.replace("  cuts:\n    mode: none\n", "  cuts:\n    mode: none\n  post:\n    verify_refill_areas: false\n"))
-    project = load_project(project_file)
-    assert project.panel.post.verify_refill_areas is False
+    project_file.write_text(VALID.replace("  cuts:\n    mode: none\n", "  cuts:\n    mode: none\n  post:\n    verify_refill_areas: true\n"))
+    assert load_project(project_file).panel.post.verify_refill_areas is True
+
+
+def test_refill_area_verification_accepts_explicit_false(tmp_path: Path):
+    (tmp_path / "main.kicad_pcb").write_text("board")
+    project_file = tmp_path / "pack.yaml"
+    project_file.write_text(VALID.replace(
+        "  cuts:\n    mode: none\n",
+        "  cuts:\n    mode: none\n  post:\n    verify_refill_areas: false\n",
+    ))
+    assert load_project(project_file).panel.post.verify_refill_areas is False
 
 
 def test_duplicate_key_is_rejected(tmp_path: Path):

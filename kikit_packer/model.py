@@ -46,7 +46,7 @@ class PostConfig:
     mill_radius_mm: float = 1.0
     origin: str = "top-left"
     refill_zones: bool = False
-    verify_refill_areas: bool = True
+    verify_refill_areas: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,7 @@ class BoardInspection:
     copper_layers: tuple[str, ...]
     copper_layer_count: int
     thickness_iu: int
+    setup_sha256: str
     stackup: dict[str, object] | None = None
     diagnostics: tuple[Diagnostic, ...] = ()
 

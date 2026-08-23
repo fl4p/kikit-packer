@@ -4,7 +4,7 @@ from pathlib import Path
 from .diagnostics import Diagnostic, warning
 from .model import BoardInspection
 from .protocol import file_sha256
-from .stackup import parse_stackup
+from .stackup import parse_setup_digest, parse_stackup
 
 
 def _box_tuple(box) -> tuple[int, int, int, int]:
@@ -56,14 +56,13 @@ def inspect_board(path: Path, source_id: str) -> BoardInspection:
     )
     stackup = parse_stackup(path)
     has_stackup = bool(getattr(board.GetDesignSettings(), "m_HasStackup", False))
-    if has_stackup != stackup["present"] or (stackup["present"] and not stackup["verified"]):
-        diagnostics.append(warning(
-            "STACKUP_UNVERIFIED",
-            f"/sources/{source_id}",
-            "explicit stackup could not be fully normalized",
-            unknown_keys=stackup.get("unknown_keys", []),
-            problems=stackup.get("problems", []),
-        ))
+    if has_stackup != stackup["present"]:
+        raise RuntimeError(f"pcbnew stackup presence disagrees with board syntax: {path}")
+    if stackup["present"] and not stackup["verified"]:
+        raise RuntimeError(
+            f"explicit stackup could not be fully normalized for {path}: "
+            f"unknown={stackup.get('unknown_keys', [])} problems={stackup.get('problems', [])}"
+        )
     return BoardInspection(
         source_id=source_id,
         path=path,
@@ -73,6 +72,7 @@ def inspect_board(path: Path, source_id: str) -> BoardInspection:
         copper_layers=copper_layers,
         copper_layer_count=board.GetCopperLayerCount(),
         thickness_iu=board.GetDesignSettings().GetBoardThickness(),
+        setup_sha256=parse_setup_digest(path),
         stackup=stackup,
         diagnostics=tuple(diagnostics),
     )
@@ -85,6 +85,9 @@ def validate_authority(
     allow_mixed_thickness: bool,
 ) -> tuple[Diagnostic, ...]:
     diagnostics: list[Diagnostic] = []
+    authority_stackup = authority.stackup or {}
+    if authority_stackup.get("present") and not authority_stackup.get("verified"):
+        raise RuntimeError(f"authority {authority.path} has an unverified explicit stackup")
     authority_layers = set(authority.copper_layers)
     for source in sources:
         source_layers = set(source.copper_layers)
@@ -112,6 +115,10 @@ def validate_authority(
             ))
         a_stack = authority.stackup or {}
         s_stack = source.stackup or {}
+        if s_stack.get("present") and not s_stack.get("verified"):
+            raise RuntimeError(f"source {source.path} has an unverified explicit stackup")
+        if source.copper_layer_count != authority.copper_layer_count and s_stack.get("present"):
+            raise RuntimeError(f"mixed-layer source {source.path} has an explicit stackup")
         if source.copper_layer_count == authority.copper_layer_count and (a_stack.get("present") or s_stack.get("present")):
             if not a_stack.get("verified") or not s_stack.get("verified"):
                 raise RuntimeError(f"explicit stackup comparison is unverified for {source.path}")

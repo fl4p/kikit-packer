@@ -38,16 +38,10 @@ def build_manifest(
         "instances": plan.get("instances", []),
         "packing": plan.get("packing", {}),
         "resolved_settings": plan.get("resolved_settings", {}),
-        "plugin_result": result,
-        "verification": {
-            "status": "passed",
-            "source_profiles": True,
-            "placements": True,
-            "authority": True,
-            "tab_connectivity": True,
-            "cut_inventory": True,
-            "artifact_hashes": True,
+        "plugin_result": {
+            key: value for key, value in result.items() if key != "parent_verification"
         },
+        "verification": result["parent_verification"],
         "artifacts": artifact_records(artifacts),
         "diagnostics": plan.get("diagnostics", []) + result.get("diagnostics", []),
     }
