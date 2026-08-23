@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7,<9", "ruff>=0.6,<1"]
+test = ["pytest>=7,<9", "ruff==0.15.0"]
 build = ["build>=1,<2"]
 
 [project.scripts]
@@ -27,6 +27,9 @@ version = {attr = "kikit_packer.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["kikit_packer*"]
+
+[tool.setuptools.package-data]
+kikit_packer = ["resources/*.kicad_pcb", "kikit_181_preset.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

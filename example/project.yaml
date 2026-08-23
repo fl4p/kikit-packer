@@ -1,7 +1,7 @@
 version: 1
 panel:
   authority:
-    board: main.kicad_pcb
+    board: safe/main.kicad_pcb
     reference_only: false
   output: combined.kicad_pcb
   max_width_mm: 100
@@ -19,15 +19,14 @@ panel:
     offset_mm: 0
     prolong_mm: 0
   post:
-    mill_radius_mm: 1
-    # These synthetic edge-poured boards intentionally change on a merged-panel refill.
-    verify_refill_areas: false
+    mill_radius_mm: 0
+    verify_refill_areas: true
   allow_mixed_layers: false
   allow_mixed_thickness: false
 boards:
-  - board: main.kicad_pcb
+  - board: safe/main.kicad_pcb
     qty: 1
     margin_mm: 2
-  - board: long.kicad_pcb
+  - board: safe/long.kicad_pcb
     qty: 4
     margin_mm: 1

@@ -35,6 +35,31 @@ def test_path_loaded_plugin_from_example_directory(tmp_path: Path):
     )
     assert process.returncode == 0, process.stderr
     assert output.is_file()
+    import pcbnew
+
+    board = pcbnew.LoadBoard(str(output))
+    bounds = board.GetBoardEdgesBoundingBox()
+    assert [bounds.GetX(), bounds.GetY(), bounds.GetWidth(), bounds.GetHeight()] == [
+        111_950_270,
+        19_950_376,
+        73_099_435,
+        135_099_624,
+    ]
+    assert {
+        "drawings": len(board.GetDrawings()),
+        "footprints": len(board.GetFootprints()),
+        "layers": board.GetCopperLayerCount(),
+        "thickness": board.GetDesignSettings().GetBoardThickness(),
+        "tracks": len(board.GetTracks()),
+        "zones": len(board.Zones()),
+    } == {
+        "drawings": 946,
+        "footprints": 42,
+        "layers": 2,
+        "thickness": 1_600_000,
+        "tracks": 0,
+        "zones": 5,
+    }
 
 
 def test_raw_plugin_rejects_versioned_project(tmp_path: Path):

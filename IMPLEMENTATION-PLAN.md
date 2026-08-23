@@ -91,10 +91,12 @@ boards, missing descriptors, and mixed 0.6/1.0/1.6 mm sources.
 
 ### 2.3 Zones and DRC
 
-Source zones are copied without refill. Zone outlines outside the packed copper extent emit
-`ZONE_OUTSIDE_PACKED_EXTENT`. Generation and verification must not refill zones. Whole-panel DRC is
-optional and reported separately; it is not a fabrication-readiness verdict for heterogeneous
-source projects.
+Zone outlines outside the packed copper extent emit `ZONE_OUTSIDE_PACKED_EXTENT`. The experimental
+`verify_refill_areas` guard defaults off. When enabled, it requires every source to be
+refill-stable, canonically refills the staged panel, then independently refills a temporary copy in
+the parent process and compares exact integer area per zone-layer. Source zone outlines and
+internal `Edge.Cuts` remain independently verified. Whole-panel DRC is optional and reported separately; it
+is not a fabrication-readiness verdict for heterogeneous source projects.
 
 ## 3. User experience
 
@@ -203,6 +205,7 @@ panel:
     mill_radius_mm: 1
     origin: top-left
     refill_zones: false
+    verify_refill_areas: true
   page:
     mode: inherit
   allow_mixed_layers: false
@@ -500,8 +503,10 @@ Before promotion:
 - source and companion snapshots still match recorded hashes;
 - plugin result matches the run plan and output hash;
 - output was produced by the current nonce-bearing run;
-- a temporary-copy refill leaves every zone-layer copper area exactly unchanged;
-- zones in the promoted output were not refilled.
+- source zone outlines and internal substrate cutouts are preserved independently of fill caches;
+- when `verify_refill_areas` is enabled, every source is refill-stable, the staged panel is
+  canonically refilled, and an independent parent temporary-copy refill leaves each zone-layer's
+  exact integer area unchanged.
 
 ## 7. Output artifact transaction
 
@@ -735,7 +740,9 @@ hashes.
 - impossible/disconnected tabs fail before promotion;
 - source mutation cannot alter a snapshot-bound run;
 - failure/cancel/lock preserves every previous artifact;
-- zones are not refilled.
+- opt-in source stability, staged canonical refill, and independent second-refill area stability are
+  covered;
+- disabled refill telemetry is exact and cutout preservation remains independently enforced.
 
 ### 12.4 GUI and installer coverage
 

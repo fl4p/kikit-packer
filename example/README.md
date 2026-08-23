@@ -6,9 +6,9 @@ The versioned project is `project.yaml`:
 kikit-packer pack project.yaml
 ```
 
-Its synthetic zones pour to source-board edges and intentionally change when those edges become
-panel tabs, so this fixture explicitly skips the refill-area audit. Production projects should
-leave `post.verify_refill_areas` enabled.
+The versioned project explicitly opts into the experimental refill-area guard and uses zone-free
+copies under `safe/`, so its source and second-refill checks remain deterministic. The legacy files
+retain their synthetic edge-poured zones.
 
 `merge.yaml`, `panelize.sh`, and `panelize.bat` remain legacy compatibility examples that invoke the
 path-loaded KiKit plugin directly.

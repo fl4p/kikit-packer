@@ -108,12 +108,13 @@ combined.kicad_dru        # when produced
 combined.kicad_pcb.panel.json
 ```
 
-Generation uses read-only snapshots and a nonce-bound plan. Before promotion, the KiCad child
-refills every zone on a temporary board copy and requires each zone-layer copper area to remain
-exactly unchanged. This audit never modifies the staged output. Set `post.verify_refill_areas` to
-`false` only for a reviewed panel whose removed source-board edges intentionally change a refill;
-the skipped audit is recorded in the manifest. Failure, cancellation, verification errors, and
-KiCad locks preserve the prior managed artifact set.
+Generation uses read-only snapshots and a nonce-bound plan. Source geometry and internal
+`Edge.Cuts` are verified independently of derived zone fills. The experimental
+`verify_refill_areas` guard defaults to `false`. When explicitly enabled, it requires every source
+to be refill-stable, saves a canonically refilled staged panel, and independently refills a
+temporary copy in the parent process. Exact integer area per zone-layer must remain identical;
+equivalent filled-polygon representations are ignored. Failure, cancellation, verification errors,
+and KiCad locks preserve the prior managed artifact set.
 
 Diagnose runtime problems:
 

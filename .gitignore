@@ -22,6 +22,8 @@ venv-ki/bin/
 
 venv-ki/
 
+!kikit_packer/resources/smoke.kicad_pcb
 !tests/fixtures/**/*.kicad_pcb
 !tests/fixtures/**/*.kicad_pro
 !tests/fixtures/**/*.kicad_dru
+!example/safe/*.kicad_pcb
