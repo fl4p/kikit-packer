@@ -1,4 +1,4 @@
-import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,8 +12,10 @@ from .protocol import (
     resolve_staging_path,
     validate_envelope,
 )
-from .refill import verify_refill_areas
+from .refill import RefillAreaError, refill_and_save, verify_refill_areas
 from .snapshot import verify_snapshots_from_plan
+
+CONTRACT_TOKEN = "__KIKIT_PACKER_RUN_CONTRACT__"
 
 
 def _mm(value: Any) -> str:
@@ -88,6 +90,62 @@ def _raw_overrides(plan: dict[str, Any], contract_path: Path) -> dict[str, dict[
     }
 
 
+def _obtain_preset(ki, sections):
+    return ki.obtainPreset(
+        [],
+        source=sections.get("source"),
+        layout=sections.get("layout"),
+        tabs=sections.get("tabs"),
+        cuts=sections.get("cuts"),
+        framing=sections.get("framing"),
+        tooling=sections.get("tooling"),
+        fiducials=sections.get("fiducials"),
+        text=sections.get("text"),
+        text2=sections.get("text2"),
+        text3=sections.get("text3"),
+        text4=sections.get("text4"),
+        copperfill=sections.get("copperfill"),
+        page=sections.get("page"),
+        post=sections.get("post"),
+        debug=sections.get("debug"),
+    )
+
+
+def _key_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _key_shape(item) for key, item in value.items()}
+    return None
+
+
+def complete_raw_preset(plan: dict[str, Any]) -> dict[str, Any]:
+    from kikit import panelize_ui_impl as ki
+
+    pinned = json.loads(Path(__file__).with_name("kikit_181_preset.json").read_text())
+    minimal = _raw_overrides(plan, Path(CONTRACT_TOKEN))
+    for section, values in minimal.items():
+        if section not in pinned or not isinstance(values, dict):
+            raise RuntimeError(f"unsupported KiKit preset section: {section}")
+        unknown = set(values) - set(pinned[section])
+        if unknown:
+            raise RuntimeError(f"unsupported KiKit preset fields in {section}: {sorted(unknown)}")
+        pinned[section].update(values)
+    processed = _obtain_preset(ki, pinned)
+    complete = json.loads(ki.dumpPreset(processed))
+    if not isinstance(complete, dict) or _key_shape(complete) != _key_shape(pinned):
+        raise RuntimeError("KiKit 1.8.1 preset capability shape changed")
+    return complete
+
+
+def _replace_string(value: Any, old: str, replacement: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(old, replacement)
+    if isinstance(value, list):
+        return [_replace_string(item, old, replacement) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_string(item, old, replacement) for key, item in value.items()}
+    return value
+
+
 def run(contract_path: Path) -> dict[str, Any]:
     import pcbnew
     from kikit import panelize_ui_impl as ki
@@ -113,30 +171,34 @@ def run(contract_path: Path) -> dict[str, Any]:
     output = resolve_staging_path(root, contract["staged_output"])
     output.parent.mkdir(parents=True, exist_ok=True)
     _app = fakeKiCADGui()
-    overrides = _raw_overrides(plan, contract_path)
     resolved = plan["resolved_settings"]
     from .protocol import digest
 
-    if overrides != resolved["kikit_raw_preset"] or digest(overrides) != resolved["kikit_raw_preset_digest"]:
-        raise RuntimeError("resolved KiKit preset differs from run plan")
-    preset = ki.obtainPreset(
-        [],
-        layout=overrides["layout"],
-        tabs=overrides["tabs"],
-        cuts=overrides["cuts"],
-        framing=overrides["framing"],
-        tooling=overrides["tooling"],
-        fiducials=overrides["fiducials"],
-        text=overrides["text"],
-        text2=overrides["text2"],
-        text3=overrides["text3"],
-        text4=overrides["text4"],
-        copperfill=overrides["copperfill"],
-        page=overrides["page"],
-        post=overrides["post"],
-        debug=overrides["debug"],
-    )
-    processed_preset_sha256 = hashlib.sha256(ki.dumpPreset(preset).encode("utf-8")).hexdigest()
+    refill_enabled = resolved["project"]["post"]["verify_refill_areas"]
+    source_refill_checks = []
+    if refill_enabled:
+        for source in plan["sources"]:
+            source_path = resolve_staging_path(root, source["snapshot_path"])
+            try:
+                check = verify_refill_areas(source_path, root)
+            except RefillAreaError as exc:
+                raise RefillAreaError(
+                    f"source refill audit failed for {source['original_path']}: {exc}"
+                ) from exc
+            check["source_id"] = source["source_id"]
+            check["original_path"] = source["original_path"]
+            source_refill_checks.append(check)
+
+    portable = resolved["kikit_raw_preset"]
+    if digest(portable) != resolved["kikit_raw_preset_digest"]:
+        raise RuntimeError("raw KiKit preset digest differs from run plan")
+    overrides = _replace_string(portable, CONTRACT_TOKEN, str(contract_path))
+    preset = _obtain_preset(ki, overrides)
+    processed_dump = json.loads(ki.dumpPreset(preset))
+    normalized_processed = _replace_string(processed_dump, str(contract_path), CONTRACT_TOKEN)
+    processed_preset_sha256 = digest(normalized_processed)
+    if processed_preset_sha256 != resolved["kikit_processed_preset_digest"]:
+        raise RuntimeError("processed KiKit preset differs from run plan")
     doPanelization(
         str(authority),
         str(output),
@@ -145,13 +207,20 @@ def run(contract_path: Path) -> dict[str, Any]:
     )
     verify_snapshots_from_plan(root, plan)
     state = load_json(root / "plugin-state.json")
+    if refill_enabled:
+        canonical_refill = refill_and_save(output)
+        refill_area_check = verify_refill_areas(output, root)
+        refill_area_check["source_checks"] = source_refill_checks
+        refill_area_check["canonical_refill"] = canonical_refill
+    else:
+        refill_area_check = {
+            "enabled": False,
+            "status": "skipped",
+            "source_checks": [],
+        }
     board = pcbnew.LoadBoard(str(output))
     if board is None:
         raise RuntimeError("saved output cannot be reloaded")
-    if plan["resolved_settings"]["project"]["post"]["verify_refill_areas"]:
-        refill_area_check = verify_refill_areas(output, root)
-    else:
-        refill_area_check = {"enabled": False, "status": "skipped"}
     artifacts = []
     for candidate in (output, output.with_suffix(".kicad_pro"), output.with_suffix(".kicad_dru")):
         if candidate.exists():
