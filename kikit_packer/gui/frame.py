@@ -53,7 +53,7 @@ class MainFrame(wx.Frame):
             toolbar.Add(button, 0, wx.RIGHT, 5)
         root.Add(toolbar, 0, wx.ALL, 8)
 
-        self.boards = BoardTable(panel)
+        self.boards = BoardTable(panel, self._mark_dirty)
         root.Add(wx.StaticText(panel, label="Boards"), 0, wx.LEFT | wx.RIGHT, 8)
         root.Add(self.boards, 1, wx.EXPAND | wx.ALL, 8)
 
@@ -78,8 +78,7 @@ class MainFrame(wx.Frame):
         self.cut_offset = wx.SpinCtrlDouble(panel, min=0, max=10, initial=0, inc=0.05)
         self.cut_prolong = wx.SpinCtrlDouble(panel, min=0, max=10, initial=0, inc=0.05)
         self.mill_radius = wx.SpinCtrlDouble(panel, min=0, max=100, initial=1, inc=0.1)
-        self.verify_refill_areas = wx.CheckBox(panel, label="Verify refill areas")
-        self.verify_refill_areas.SetValue(True)
+        self.verify_refill = wx.CheckBox(panel, label="Experimental refill-area verification")
         self.allow_mixed_layers = wx.CheckBox(panel, label="Allow mixed layer subsets")
         self.allow_mixed_thickness = wx.CheckBox(panel, label="Allow mixed thickness")
         pairs = [
@@ -91,7 +90,7 @@ class MainFrame(wx.Frame):
             ("Tab minimum distance mm", self.tab_min_distance, "Cut mode", self.cut_mode),
             ("Mousebite drill mm", self.cut_drill, "Mousebite spacing mm", self.cut_spacing),
             ("Mousebite offset mm", self.cut_offset, "Mousebite prolong mm", self.cut_prolong),
-            ("Mill radius mm", self.mill_radius, "", self.verify_refill_areas),
+            ("Mill radius mm", self.mill_radius, "", self.verify_refill),
             ("", self.allow_mixed_layers, "", self.allow_mixed_thickness),
         ]
         for left_label, left, right_label, right in pairs:
@@ -143,13 +142,18 @@ class MainFrame(wx.Frame):
             self.cut_offset,
             self.cut_prolong,
             self.mill_radius,
-            self.verify_refill_areas,
+            self.verify_refill,
             self.allow_mixed_layers,
             self.allow_mixed_thickness,
         ]
         for control in (self.authority, self.output):
             control.Bind(wx.EVT_FILEPICKER_CHANGED, self._on_dirty)
-        for control in (self.reference_only, self.verify_refill_areas, self.allow_mixed_layers, self.allow_mixed_thickness):
+        for control in (
+            self.reference_only,
+            self.verify_refill,
+            self.allow_mixed_layers,
+            self.allow_mixed_thickness,
+        ):
             control.Bind(wx.EVT_CHECKBOX, self._on_dirty)
         for control in (self.tab_mode, self.cut_mode):
             control.Bind(wx.EVT_CHOICE, self._on_dirty)
@@ -175,12 +179,15 @@ class MainFrame(wx.Frame):
             shutil.rmtree(root, ignore_errors=True)
             self.prepared = None
 
-    def _on_dirty(self, event):
+    def _mark_dirty(self):
         if not self.model.busy:
             self._discard_prepared()
             self.model.dirty()
             self.preview.set_plan(None)
             self.status.SetLabel("Project changed; validate again")
+
+    def _on_dirty(self, event):
+        self._mark_dirty()
         event.Skip()
 
     def _on_close(self, event):
@@ -283,7 +290,7 @@ class MainFrame(wx.Frame):
                     "mill_radius_mm": self.mill_radius.GetValue(),
                     "origin": "top-left",
                     "refill_zones": False,
-                    "verify_refill_areas": self.verify_refill_areas.GetValue(),
+                    "verify_refill_areas": self.verify_refill.GetValue(),
                 },
                 "page": {"mode": "inherit"},
                 "allow_mixed_layers": self.allow_mixed_layers.GetValue(),
@@ -328,7 +335,7 @@ class MainFrame(wx.Frame):
         self.cut_offset.SetValue(project.panel.cuts.offset_mm)
         self.cut_prolong.SetValue(project.panel.cuts.prolong_mm)
         self.mill_radius.SetValue(project.panel.post.mill_radius_mm)
-        self.verify_refill_areas.SetValue(project.panel.post.verify_refill_areas)
+        self.verify_refill.SetValue(project.panel.post.verify_refill_areas)
         self.allow_mixed_layers.SetValue(project.panel.allow_mixed_layers)
         self.allow_mixed_thickness.SetValue(project.panel.allow_mixed_thickness)
         self.saved_revision = self.model.revision

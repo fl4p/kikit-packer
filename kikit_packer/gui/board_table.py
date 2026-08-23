@@ -13,12 +13,15 @@ class BoardDropTarget(wx.FileDropTarget):
             if filename.lower().endswith(".kicad_pcb"):
                 self.table.view.AppendItem([filename, "1", "1", "", "", "", "", ""])
                 added = True
+        if added:
+            self.table.notify_change()
         return added
 
 
 class BoardTable(wx.Panel):
-    def __init__(self, parent):
+    def __init__(self, parent, on_change=None):
         super().__init__(parent)
+        self.on_change = on_change
         self.view = dv.DataViewListCtrl(self, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES)
         self.view.AppendTextColumn("Board", width=420, mode=dv.DATAVIEW_CELL_EDITABLE)
         self.view.AppendTextColumn("Quantity", width=80, mode=dv.DATAVIEW_CELL_EDITABLE)
@@ -44,11 +47,13 @@ class BoardTable(wx.Panel):
             if dialog.ShowModal() == wx.ID_OK:
                 for path in dialog.GetPaths():
                     self.view.AppendItem([path, "1", "1", "", "", "", "", ""])
+                self.notify_change()
 
     def _remove(self, _event):
         row = self.view.GetSelectedRow()
         if row >= 0:
             self.view.DeleteItem(row)
+            self.notify_change()
 
     def _move(self, delta):
         row = self.view.GetSelectedRow()
@@ -59,12 +64,17 @@ class BoardTable(wx.Panel):
         rows[row], rows[target] = rows[target], rows[row]
         self.set_rows(rows)
         self.view.SelectRow(target)
+        self.notify_change()
 
     def rows(self):
         return [
             [str(self.view.GetValue(row, column)) for column in range(3)]
             for row in range(self.view.GetItemCount())
         ]
+
+    def notify_change(self):
+        if self.on_change is not None:
+            self.on_change()
 
     def set_rows(self, rows):
         self.view.DeleteAllItems()
