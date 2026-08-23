@@ -3,12 +3,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 RECEIPT_VERSION = 2
@@ -30,6 +32,155 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def source_hash(path: Path) -> str:
+    if path.is_file():
+        return file_hash(path)
+    digest = hashlib.sha256()
+    included = []
+    for candidate in path.rglob("*"):
+        relative = candidate.relative_to(path)
+        if (
+            candidate.is_file()
+            and not candidate.is_symlink()
+            and not any(part.startswith(".") or part in {"build", "dist", "venv", "venv-ki", "__pycache__"} for part in relative.parts)
+        ):
+            included.append((relative, candidate))
+    for relative, candidate in sorted(included):
+        digest.update(str(relative).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(candidate.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def source_version(path: Path) -> str:
+    if path.is_file() and path.suffix == ".whl":
+        with zipfile.ZipFile(path) as archive:
+            metadata_name = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+            metadata = archive.read(metadata_name).decode("utf-8")
+        match = re.search(r"^Version: (.+)$", metadata, re.MULTILINE)
+    else:
+        match = re.search(
+            r'^__version__\s*=\s*["\']([^"\']+)["\']',
+            (path / "kikit_packer/__init__.py").read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    if match is None:
+        raise RuntimeError("cannot determine package version from source")
+    return match.group(1).strip()
+
+
+def runtime_identity(interpreter: Path, timeout: float = 15) -> dict:
+    code = r'''import json,platform,sys
+import pcbnew,wx
+print(json.dumps({
+ "python": platform.python_version(),
+ "python_major_minor": "%s.%s" % (sys.version_info[0], sys.version_info[1]),
+ "system": platform.system(),
+ "machine": platform.machine(),
+ "kicad": str(pcbnew.GetBuildVersion()),
+ "pcbnew_origin": str(pcbnew.__file__),
+ "wx_origin": str(wx.__file__),
+}, sort_keys=True))'''
+    process = subprocess.run(
+        [str(interpreter), "-s", "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env={**os.environ, "PYTHONNOUSERSITE": "1", "PYTHONPATH": ""},
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"KiCad runtime probe failed: {process.stderr[-2000:]}")
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("KiCad runtime probe returned invalid JSON") from exc
+    expected = {
+        "python_major_minor": "3.9",
+        "system": "Darwin",
+        "machine": "arm64",
+        "kicad": "10.0.5",
+    }
+    problems = [f"{key}={result.get(key)} expected {value}" for key, value in expected.items() if result.get(key) != value]
+    if problems:
+        raise RuntimeError("unsupported KiCad runtime: " + "; ".join(problems))
+    for name in ("pcbnew_origin", "wx_origin"):
+        if "/Applications/KiCad/" not in result.get(name, ""):
+            raise RuntimeError(f"protected module has unexpected origin: {name}={result.get(name)}")
+    result["support_cell"] = "darwin-arm64-py39-kicad-10.0.5"
+    return result
+
+
+@contextmanager
+def installer_lock(_root: Path):
+    if os.name == "nt":
+        path = Path(os.environ["LOCALAPPDATA"]) / ".kikit-packer-installer.lock"
+    else:
+        path = Path.home() / ".local/share/.kikit-packer-installer.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError("another installer transaction is active") from exc
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        os.close(descriptor)
+        yield
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _owned_receipt(root: Path, payload_paths: list[Path]):
+    receipt_path = root / "install-receipt.json"
+    receipt_hash_path = root / "install-receipt.sha256"
+    current = root / "current.txt"
+    ownership_files = (receipt_path, receipt_hash_path, current)
+    present = [path.exists() or path.is_symlink() for path in ownership_files]
+    if not any(present):
+        if any(path.exists() or path.is_symlink() for path in payload_paths):
+            raise RuntimeError("an external launcher exists without a receipt owned by this install root")
+        versions = root / "versions"
+        if versions.exists() and any(versions.iterdir()):
+            raise RuntimeError("version store contains entries without an ownership receipt")
+        return None
+    if not all(present):
+        raise RuntimeError("install ownership metadata is incomplete")
+    if any(not path.is_file() or path.is_symlink() for path in ownership_files):
+        raise RuntimeError("install ownership metadata is unsafe")
+    encoded = receipt_path.read_bytes()
+    if hashlib.sha256(encoded).hexdigest() != receipt_hash_path.read_text(encoding="ascii").strip():
+        raise RuntimeError("install receipt hash mismatch")
+    receipt = json.loads(encoded)
+    if receipt.get("schema_version") != RECEIPT_VERSION or Path(receipt.get("install_root", "")).resolve() != root.resolve():
+        raise RuntimeError("install receipt ownership mismatch")
+    expected_paths = {str(path.resolve()) for path in payload_paths}
+    managed = receipt.get("managed_files", [])
+    if {item.get("path") for item in managed} != expected_paths:
+        raise RuntimeError("install receipt launcher set mismatch")
+    for item in managed:
+        path = Path(item["path"])
+        if not path.is_file() or path.is_symlink() or file_hash(path) != item["sha256"]:
+            raise RuntimeError(f"installer-managed launcher was modified: {path}")
+    version_roots = [Path(receipt["version_root"])] + [Path(path) for path in receipt.get("retained_version_roots", [])]
+    if Path(current.read_text(encoding="utf-8").strip()).resolve() != version_roots[0].resolve():
+        raise RuntimeError("current pointer differs from install receipt")
+    for version_root in version_roots:
+        try:
+            version_root.resolve().relative_to((root / "versions").resolve())
+        except ValueError as exc:
+            raise RuntimeError("receipt version root escapes installer root") from exc
+        if not version_root.is_dir() or version_root.is_symlink():
+            raise RuntimeError("receipt version root is missing or unsafe")
+    entries = {path.resolve() for path in (root / "versions").iterdir()}
+    if entries != {path.resolve() for path in version_roots}:
+        raise RuntimeError("version store contains unowned entries")
+    return receipt
+
+
 def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
@@ -49,12 +200,10 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
 
 
 def probe(interpreter: Path, timeout: float = 15) -> bool:
-    code = "import pcbnew, wx; print(pcbnew.GetBuildVersion(), wx.version())"
     try:
-        return subprocess.run(
-            [str(interpreter), "-c", code], capture_output=True, timeout=timeout, check=False
-        ).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        runtime_identity(interpreter, timeout)
+        return True
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return False
 
 
@@ -153,21 +302,34 @@ def external_payloads(root: Path):
     return payloads
 
 
-def install(
+def _install_locked(
     interpreter: Path,
     source: Path,
     root: Path,
     expected_source_sha256: str = "",
 ) -> Path:
-    if source.is_file():
-        actual_source_hash = file_hash(source)
-        if not expected_source_sha256:
-            raise RuntimeError("--source-sha256 is required for wheel installation")
-        if actual_source_hash != expected_source_sha256.lower():
-            raise RuntimeError("source artifact SHA-256 mismatch")
-    else:
-        actual_source_hash = "development-directory"
-    root.mkdir(parents=True, exist_ok=True)
+    actual_source_hash = source_hash(source)
+    if source.is_file() and not expected_source_sha256:
+        raise RuntimeError("--source-sha256 is required for wheel installation")
+    if source.is_file() and actual_source_hash != expected_source_sha256.lower():
+        raise RuntimeError("source artifact SHA-256 mismatch")
+    payloads = external_payloads(root)
+    prior = _owned_receipt(root, [path for path, _, _ in payloads])
+    runtime = runtime_identity(interpreter)
+    lock = dependency_lock(interpreter)
+    version = source_version(source)
+    identity = {
+        "version": version,
+        "source_sha256": actual_source_hash,
+        "dependency_lock_sha256": file_hash(lock),
+        "runtime": runtime,
+    }
+    identity_sha256 = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    install_id = identity_sha256[:24]
+    if prior is not None and prior.get("identity_sha256") == identity_sha256:
+        return payloads[0][0]
     versions = root / "versions"
     versions.mkdir(exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".install-", dir=str(versions)))
@@ -179,7 +341,6 @@ def install(
             [str(interpreter), "-m", "venv", "--system-site-packages", str(environment)], check=True
         )
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        lock = dependency_lock(interpreter)
         subprocess.run(
             [
                 str(python),
@@ -217,16 +378,91 @@ def install(
             raise RuntimeError(
                 f"installed environment failed doctor (exit {doctor.returncode}): stdout={doctor.stdout[-4000:]} stderr={doctor.stderr[-4000:]}"
             )
-        version = subprocess.run(
+        try:
+            doctor_data = json.loads(doctor.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("installed environment doctor returned invalid JSON") from exc
+        selected = doctor_data.get("selected")
+        if selected is None or Path(selected.get("executable", "")).resolve() != python.resolve():
+            raise RuntimeError("doctor did not select the staged interpreter")
+        selected_modules = selected.get("modules", {})
+        if selected_modules.get("pcbnew", {}).get("origin") != runtime["pcbnew_origin"]:
+            raise RuntimeError("staged environment changed protected pcbnew provenance")
+        if selected_modules.get("wx", {}).get("origin") != runtime["wx_origin"]:
+            raise RuntimeError("staged environment changed protected wx provenance")
+        smoke_root = staging / "smoke"
+        smoke_root.mkdir()
+        resource = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "from importlib.resources import files; print(files('kikit_packer').joinpath('resources/smoke.kicad_pcb'))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        board_probe = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import pcbnew,sys; b=pcbnew.LoadBoard(sys.argv[1]); raise SystemExit(0 if b and b.GetCopperLayerCount()==2 else 1)",
+                resource,
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if board_probe.returncode != 0:
+            raise RuntimeError("staged environment failed board-load smoke")
+        smoke_output = smoke_root / "panel.kicad_pcb"
+        smoke_project = smoke_root / "project.json"
+        smoke_project.write_text(json.dumps({
+            "version": 1,
+            "panel": {
+                "authority": {"board": resource, "reference_only": False},
+                "output": str(smoke_output),
+                "max_width_mm": 40,
+                "max_height_mm": 50,
+                "tabs": {"mode": "flat-edge", "width_mm": 2},
+                "cuts": {"mode": "none"},
+                "post": {"mill_radius_mm": 0, "verify_refill_areas": True},
+            },
+            "boards": [{"board": resource, "qty": 1, "margin_mm": 1}],
+        }))
+        generation = subprocess.run(
+            [str(python), "-m", "kikit_packer", "pack", str(smoke_project)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if generation.returncode != 0 or not smoke_output.is_file():
+            raise RuntimeError(
+                f"staged environment failed generation smoke: {generation.stderr[-4000:]}"
+            )
+        gui_import = subprocess.run(
+            [str(python), "-c", "import wx; from kikit_packer.gui.frame import MainFrame"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if gui_import.returncode != 0:
+            raise RuntimeError(f"staged environment failed GUI import smoke: {gui_import.stderr[-2000:]}")
+        shutil.rmtree(smoke_root)
+        installed_version = subprocess.run(
             [str(python), "-c", "import kikit_packer; print(kikit_packer.__version__)"],
             capture_output=True,
             text=True,
             check=True,
         ).stdout.strip()
-        install_id = uuid.uuid4().hex
-        final = versions / (version + "-" + install_id[:12])
+        if installed_version != version:
+            raise RuntimeError("installed package version differs from source metadata")
+        final = versions / (version + "-" + install_id)
+        if final.exists():
+            raise RuntimeError("deterministic version root exists without matching ownership receipt")
         os.replace(str(staging), str(final))
-        payloads = external_payloads(root)
         current = root / "current.txt"
         receipt_path = root / "install-receipt.json"
         receipt_hash_path = root / "install-receipt.sha256"
@@ -250,18 +486,19 @@ def install(
             ).stdout
         )
         retained_versions = []
-        for candidate in versions.iterdir():
-            if candidate != final:
-                if not candidate.is_dir() or candidate.is_symlink():
-                    raise RuntimeError(f"unexpected entry in version store: {candidate}")
-                retained_versions.append(str(candidate.resolve()))
+        if prior is not None:
+            retained_versions = [
+                str(Path(prior["version_root"]).resolve()),
+                *[str(Path(path).resolve()) for path in prior.get("retained_version_roots", [])],
+            ]
         receipt = {
             "schema_version": RECEIPT_VERSION,
             "install_id": install_id,
+            "identity_sha256": identity_sha256,
             "install_root": str(root.resolve()),
             "version_root": str(final.resolve()),
             "retained_version_roots": sorted(retained_versions),
-            "runtime": str(interpreter.absolute()),
+            "runtime": runtime,
             "source": str(source.resolve()),
             "source_sha256": actual_source_hash,
             "dependency_lock_sha256": file_hash(lock),
@@ -288,6 +525,17 @@ def install(
             shutil.rmtree(final, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def install(
+    interpreter: Path,
+    source: Path,
+    root: Path,
+    expected_source_sha256: str = "",
+) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    with installer_lock(root):
+        return _install_locked(interpreter, source, root, expected_source_sha256)
 
 
 def main(argv=None) -> int:
