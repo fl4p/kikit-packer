@@ -24,14 +24,16 @@ class Chain:
         return self.points[index]
 
 
-def record(area):
-    return {
+def record(area, geometry="a" * 64):
+    value = {
         "zone_uuid": "zone-1",
         "zone": "GND",
         "layer": 0,
         "layer_name": "F.Cu",
         "area_iu2_x2": area,
     }
+    value["geometry_sha256"] = geometry
+    return value
 
 
 def test_exact_area_preserves_one_iu2_at_large_coordinates():
@@ -44,12 +46,10 @@ def test_exact_area_preserves_one_iu2_at_large_coordinates():
 def test_identical_refill_areas_pass():
     snapshot = {"zone-1:0": record(12345)}
     result = compare_fill_area_snapshots(snapshot, snapshot)
-    assert result == {
-        "enabled": True,
-        "status": "passed",
-        "zone_layer_count": 1,
-        "total_area_iu2_x2": 12345,
-    }
+    assert result["enabled"] is True
+    assert result["status"] == "passed"
+    assert result["zone_layer_count"] == 1
+    assert result["total_area_iu2_x2"] == 12345
 
 
 def test_changed_refill_area_fails_with_zone_and_delta():
@@ -57,6 +57,12 @@ def test_changed_refill_area_fails_with_zone_and_delta():
     after = {"zone-1:0": record(4_000_000_000_000)}
     with pytest.raises(RefillAreaError, match=r"GND on F.Cu: \+1\.000000000 mm\^2"):
         compare_fill_area_snapshots(before, after)
+
+
+def test_equal_area_changed_geometry_passes():
+    before = {"zone-1:0": record(12345, "a" * 64)}
+    after = {"zone-1:0": record(12345, "b" * 64)}
+    assert compare_fill_area_snapshots(before, after)["status"] == "passed"
 
 
 def test_added_zone_layer_fill_fails():
