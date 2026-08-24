@@ -12,6 +12,7 @@ from .fingerprint import (
     semantic_item,
     translated_profile_items,
 )
+from .geometry import planned_substrate_bounds
 from .protocol import file_sha256, load_json, resolve_staging_path, validate_envelope
 from .refill import RefillAreaError, verify_refill_areas
 from .stackup import parse_setup_digest, parse_stackup
@@ -19,25 +20,6 @@ from .stackup import parse_setup_digest, parse_stackup
 
 class VerificationError(RuntimeError):
     pass
-
-
-def _expected_substrate_bounds(instance):
-    source_left, source_top, _source_right, source_bottom = instance["source_area_iu"]
-    outline_left, outline_top, outline_right, outline_bottom = instance["outline_bounds_iu"]
-    destination_x, destination_y = instance["append"]["destination_iu"]
-    if instance["packing_rotation_deg"] == 0:
-        return [
-            destination_x + outline_left - source_left,
-            destination_y + outline_top - source_top,
-            destination_x + outline_right - source_left,
-            destination_y + outline_bottom - source_top,
-        ]
-    return [
-        destination_x + source_bottom - outline_bottom,
-        destination_y + outline_left - source_left,
-        destination_x + source_bottom - outline_top,
-        destination_y + outline_right - source_left,
-    ]
 
 
 def _polygon(value, x: int, y: int):
@@ -58,7 +40,7 @@ def _verify_saved_material(board, plan, page_delta) -> tuple[list[list[str]], li
 
     instance_material = []
     for planned in plan["instances"]:
-        bounds = _expected_substrate_bounds(planned)
+        bounds = planned_substrate_bounds(planned)
         polygons = planned["expected_inventory"]["substrates"][str(planned["packing_rotation_deg"])]
         material = unary_union([
             _polygon(value, bounds[0] + page_delta[0], bounds[1] + page_delta[1])
@@ -352,7 +334,7 @@ def verify_result(root: Path, plan: dict[str, Any], contract: dict[str, Any]) ->
         raise VerificationError("plugin result does not represent every planned instance")
     from kikit.panelize import findBoardBoundingBox
 
-    expected_bounds_by_instance = [_expected_substrate_bounds(item) for item in plan["instances"]]
+    expected_bounds_by_instance = [planned_substrate_bounds(item) for item in plan["instances"]]
     expected_panel_bounds = [
         min(bounds[0] for bounds in expected_bounds_by_instance),
         min(bounds[1] for bounds in expected_bounds_by_instance),

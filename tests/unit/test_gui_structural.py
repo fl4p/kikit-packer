@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,6 +9,7 @@ pytest.importorskip("wx")
 
 from kikit_packer.gui.board_table import BoardDropTarget, BoardTable
 from kikit_packer.gui.frame import MainFrame
+from kikit_packer.gui.preview import Preview, fit_transform, preview_instances, preview_world_bounds
 from kikit_packer.gui.view_model import State, ViewModel
 
 
@@ -58,7 +60,7 @@ def test_remove_move_and_drop_each_notify_once():
     assert table.changes == 3
 
 
-def test_default_gui_project_data_skips_experimental_refill(tmp_path: Path):
+def test_default_gui_project_data_requires_refill_verification(tmp_path: Path):
     board = tmp_path / "board.kicad_pcb"
     board.write_text("board")
 
@@ -94,13 +96,70 @@ def test_default_gui_project_data_skips_experimental_refill(tmp_path: Path):
         cut_offset=Control(0.0),
         cut_prolong=Control(0.0),
         mill_radius=Control(0.0),
-        verify_refill=Control(False),
         allow_mixed_layers=Control(False),
         allow_mixed_thickness=Control(False),
     )
     frame._number_or_none = lambda control: MainFrame._number_or_none(cast(Any, frame), control)
     data = MainFrame._project_data(cast(Any, frame))
-    assert data["panel"]["post"]["verify_refill_areas"] is False
+    assert data["panel"]["post"]["verify_refill_areas"] is True
+
+
+def test_buffered_preview_enables_paint_background_style():
+    source = inspect.getsource(Preview.__init__)
+    assert "SetBackgroundStyle(wx.BG_STYLE_PAINT)" in source
+
+
+def test_preview_uses_transformed_substrate_geometry():
+    plan = {
+        "packing": {"bounds_iu": [0, 0, 1100, 2120]},
+        "instances": [{
+            "instance_id": "board-1",
+            "source_area_iu": [0, 0, 100, 80],
+            "outline_bounds_iu": [10, 20, 90, 70],
+            "append": {"destination_iu": [1000, 2000]},
+            "packing_rotation_deg": 90,
+            "packing_size_iu": [120, 100],
+            "expected_inventory": {"substrates": {"90": [{
+                "outline": [[0, 0], [50, 0], [50, 80], [0, 80]],
+                "holes": [[[10, 10], [20, 10], [20, 20], [10, 20]]],
+            }]}},
+        }],
+    }
+    instances = preview_instances(plan)
+    assert instances[0]["substrate_bounds"] == [1010, 2010, 1060, 2090]
+    assert instances[0]["packing_bounds"] == [1000, 2000, 1100, 2120]
+    assert instances[0]["polygons"][0]["outline"][0] == [1010, 2010]
+    assert instances[0]["polygons"][0]["holes"][0][0] == [1020, 2020]
+    assert preview_world_bounds(plan, instances) == [0, 0, 1100, 2120]
+
+
+def test_preview_fit_centers_world_geometry():
+    assert fit_transform([0, 0, 100, 50], 240, 140, padding=20) == (2.0, 20.0, 20.0)
+
+
+def test_metadata_columns_do_not_invalidate_prepared_plan():
+    class Event:
+        def __init__(self, column):
+            self.column = column
+            self.skipped = False
+
+        def GetColumn(self):
+            return self.column
+
+        def Skip(self):
+            self.skipped = True
+
+    frame = SimpleNamespace(dirty_count=0)
+    frame._mark_dirty = lambda: setattr(frame, "dirty_count", frame.dirty_count + 1)
+    frame._on_dirty = lambda event: MainFrame._on_dirty(cast(Any, frame), event)
+    metadata_event = Event(3)
+    MainFrame._on_board_value_changed(cast(Any, frame), metadata_event)
+    assert frame.dirty_count == 0
+    assert metadata_event.skipped is True
+    editable_event = Event(1)
+    MainFrame._on_board_value_changed(cast(Any, frame), editable_event)
+    assert frame.dirty_count == 1
+    assert editable_event.skipped is True
 
 
 def test_structural_change_discards_prepared_plan(tmp_path: Path):

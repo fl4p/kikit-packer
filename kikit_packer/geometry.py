@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 
 def _least_rotation(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -26,6 +27,25 @@ def _least_rotation(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
         offset = 0
     start = min(left, right)
     return doubled[start : start + length]
+
+
+def planned_substrate_bounds(instance: Mapping[str, Any]) -> list[int]:
+    source_left, source_top, _source_right, source_bottom = instance["source_area_iu"]
+    outline_left, outline_top, outline_right, outline_bottom = instance["outline_bounds_iu"]
+    destination_x, destination_y = instance["append"]["destination_iu"]
+    if instance["packing_rotation_deg"] == 0:
+        return [
+            destination_x + outline_left - source_left,
+            destination_y + outline_top - source_top,
+            destination_x + outline_right - source_left,
+            destination_y + outline_bottom - source_top,
+        ]
+    return [
+        destination_x + source_bottom - outline_bottom,
+        destination_y + outline_left - source_left,
+        destination_x + source_bottom - outline_top,
+        destination_y + outline_right - source_left,
+    ]
 
 
 def canonical_ring_points(points: Iterable[tuple[int, int]]) -> list[list[int]]:

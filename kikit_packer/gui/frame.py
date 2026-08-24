@@ -21,7 +21,8 @@ from .view_model import State, ViewModel
 
 class MainFrame(wx.Frame):
     def __init__(self, parent, project=None):
-        super().__init__(parent, title="KiKit Packer", size=(1050, 900))
+        super().__init__(parent, title="KiKit Packer", size=(1400, 900))
+        self.SetMinSize((1050, 700))
         self.model = ViewModel(project_path=project)
         self.cancel_event = None
         self.last_output = None
@@ -43,7 +44,11 @@ class MainFrame(wx.Frame):
 
     def _build(self):
         panel = wx.Panel(self)
-        root = wx.BoxSizer(wx.VERTICAL)
+        root = wx.BoxSizer(wx.HORIZONTAL)
+        preview_column = wx.BoxSizer(wx.VERTICAL)
+        controls = wx.BoxSizer(wx.VERTICAL)
+        root.Add(preview_column, 3, wx.EXPAND)
+        root.Add(controls, 2, wx.EXPAND)
         toolbar = wx.BoxSizer(wx.HORIZONTAL)
         self.project_buttons = []
         for label, handler in (("Load", self._on_load), ("Save As", self._on_save)):
@@ -51,11 +56,11 @@ class MainFrame(wx.Frame):
             self.project_buttons.append(button)
             button.Bind(wx.EVT_BUTTON, handler)
             toolbar.Add(button, 0, wx.RIGHT, 5)
-        root.Add(toolbar, 0, wx.ALL, 8)
+        controls.Add(toolbar, 0, wx.ALL, 8)
 
         self.boards = BoardTable(panel, self._mark_dirty)
-        root.Add(wx.StaticText(panel, label="Boards"), 0, wx.LEFT | wx.RIGHT, 8)
-        root.Add(self.boards, 1, wx.EXPAND | wx.ALL, 8)
+        controls.Add(wx.StaticText(panel, label="Boards"), 0, wx.LEFT | wx.RIGHT, 8)
+        controls.Add(self.boards, 1, wx.EXPAND | wx.ALL, 8)
 
         settings = wx.FlexGridSizer(cols=4, hgap=8, vgap=6)
         settings.AddGrowableCol(1, 1)
@@ -78,7 +83,6 @@ class MainFrame(wx.Frame):
         self.cut_offset = wx.SpinCtrlDouble(panel, min=0, max=10, initial=0, inc=0.05)
         self.cut_prolong = wx.SpinCtrlDouble(panel, min=0, max=10, initial=0, inc=0.05)
         self.mill_radius = wx.SpinCtrlDouble(panel, min=0, max=100, initial=1, inc=0.1)
-        self.verify_refill = wx.CheckBox(panel, label="Experimental refill-area verification")
         self.allow_mixed_layers = wx.CheckBox(panel, label="Allow mixed layer subsets")
         self.allow_mixed_thickness = wx.CheckBox(panel, label="Allow mixed thickness")
         pairs = [
@@ -90,7 +94,7 @@ class MainFrame(wx.Frame):
             ("Tab minimum distance mm", self.tab_min_distance, "Cut mode", self.cut_mode),
             ("Mousebite drill mm", self.cut_drill, "Mousebite spacing mm", self.cut_spacing),
             ("Mousebite offset mm", self.cut_offset, "Mousebite prolong mm", self.cut_prolong),
-            ("Mill radius mm", self.mill_radius, "", self.verify_refill),
+            ("Mill radius mm", self.mill_radius, "", wx.StaticText(panel, label="")),
             ("", self.allow_mixed_layers, "", self.allow_mixed_thickness),
         ]
         for left_label, left, right_label, right in pairs:
@@ -98,14 +102,14 @@ class MainFrame(wx.Frame):
             settings.Add(left, 1, wx.EXPAND)
             settings.Add(wx.StaticText(panel, label=right_label), 0, wx.ALIGN_CENTER_VERTICAL)
             settings.Add(right, 1, wx.EXPAND)
-        root.Add(settings, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        controls.Add(settings, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self.preview = Preview(panel)
-        root.Add(wx.StaticText(panel, label="Preview"), 0, wx.LEFT | wx.RIGHT, 8)
-        root.Add(self.preview, 0, wx.EXPAND | wx.ALL, 8)
+        preview_column.Add(wx.StaticText(panel, label="Validated panel preview"), 0, wx.ALL, 8)
+        preview_column.Add(self.preview, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         actions = wx.BoxSizer(wx.HORIZONTAL)
-        self.validate_button = wx.Button(panel, label="Validate")
+        self.validate_button = wx.Button(panel, label="Validate & Preview")
         self.generate_button = wx.Button(panel, label="Generate")
         self.cancel_button = wx.Button(panel, label="Cancel")
         self.open_button = wx.Button(panel, label="Open in KiCad")
@@ -119,11 +123,11 @@ class MainFrame(wx.Frame):
         ):
             button.Bind(wx.EVT_BUTTON, handler)
             actions.Add(button, 0, wx.RIGHT, 6)
-        root.Add(actions, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        controls.Add(actions, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.status = wx.StaticText(panel, label="Ready")
-        root.Add(self.status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        controls.Add(self.status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.logs = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        root.Add(self.logs, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        controls.Add(self.logs, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         panel.SetSizer(root)
         self._editable_controls = [
             self.authority,
@@ -142,7 +146,6 @@ class MainFrame(wx.Frame):
             self.cut_offset,
             self.cut_prolong,
             self.mill_radius,
-            self.verify_refill,
             self.allow_mixed_layers,
             self.allow_mixed_thickness,
         ]
@@ -150,7 +153,6 @@ class MainFrame(wx.Frame):
             control.Bind(wx.EVT_FILEPICKER_CHANGED, self._on_dirty)
         for control in (
             self.reference_only,
-            self.verify_refill,
             self.allow_mixed_layers,
             self.allow_mixed_thickness,
         ):
@@ -171,7 +173,7 @@ class MainFrame(wx.Frame):
             control.Bind(wx.EVT_SPINCTRLDOUBLE, self._on_dirty)
         for control in (self.tab_hcount, self.tab_vcount):
             control.Bind(wx.EVT_SPINCTRL, self._on_dirty)
-        self.boards.view.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self._on_dirty)
+        self.boards.view.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self._on_board_value_changed)
 
     def _discard_prepared(self):
         if self.prepared is not None:
@@ -189,6 +191,12 @@ class MainFrame(wx.Frame):
     def _on_dirty(self, event):
         self._mark_dirty()
         event.Skip()
+
+    def _on_board_value_changed(self, event):
+        if event.GetColumn() >= 3:
+            event.Skip()
+            return
+        self._on_dirty(event)
 
     def _on_close(self, event):
         if (
@@ -290,7 +298,7 @@ class MainFrame(wx.Frame):
                     "mill_radius_mm": self.mill_radius.GetValue(),
                     "origin": "top-left",
                     "refill_zones": False,
-                    "verify_refill_areas": self.verify_refill.GetValue(),
+                    "verify_refill_areas": True,
                 },
                 "page": {"mode": "inherit"},
                 "allow_mixed_layers": self.allow_mixed_layers.GetValue(),
@@ -335,7 +343,6 @@ class MainFrame(wx.Frame):
         self.cut_offset.SetValue(project.panel.cuts.offset_mm)
         self.cut_prolong.SetValue(project.panel.cuts.prolong_mm)
         self.mill_radius.SetValue(project.panel.post.mill_radius_mm)
-        self.verify_refill.SetValue(project.panel.post.verify_refill_areas)
         self.allow_mixed_layers.SetValue(project.panel.allow_mixed_layers)
         self.allow_mixed_thickness.SetValue(project.panel.allow_mixed_thickness)
         self.saved_revision = self.model.revision
@@ -422,7 +429,11 @@ class MainFrame(wx.Frame):
         from ..runner import execute_prepared
 
         if self.prepared is None or self.model.state != State.PLANNED:
-            wx.MessageBox("Validate the current project before generation", "Validation required", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox(
+                "Validate and preview the current project before generation",
+                "Preview required",
+                wx.OK | wx.ICON_INFORMATION,
+            )
             return
         root, plan, contract, project = self.prepared
         if (
