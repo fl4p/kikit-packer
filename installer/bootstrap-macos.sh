@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-SOURCE_REF=43286bd2f97a3f36d97fef67e27c20e4ef45d0b0
-SOURCE_SHA256=34003c971680124c3b1eeb77ff35d1178495835bc584feff36c1071493d365d3
+SOURCE_REF=80a43fcc77b69113da4f617a33005262b7601e0b
+SOURCE_SHA256=44bb7b3054688cc3f4c4970f103186bd68ff9d1eef3974eb740d8e8a8b08c39e
 SOURCE_URL="https://codeload.github.com/fl4p/kikit-packer/tar.gz/$SOURCE_REF"
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/kikit-packer-bootstrap.XXXXXX")
