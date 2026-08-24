@@ -190,6 +190,28 @@ def _finalize_uninstall(root: Path, managed: list[Path]) -> None:
         pass
 
 
+def _restore_quarantined(entries: list[tuple[Path, Path]]) -> None:
+    restorable = []
+    for target, quarantine in entries:
+        if quarantine.exists() or quarantine.is_symlink():
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(
+                    f"uninstall recovery target was recreated while quarantined: {target}"
+                )
+            restorable.append((target, quarantine))
+    errors = []
+    for target, quarantine in reversed(restorable):
+        if target.exists() or target.is_symlink():
+            errors.append(RuntimeError(f"uninstall recovery target was recreated: {target}"))
+            continue
+        try:
+            os.replace(quarantine, target)
+        except OSError as exc:
+            errors.append(exc)
+    if errors:
+        raise RuntimeError("uninstall recovery was incomplete: " + "; ".join(map(str, errors)))
+
+
 def recover_journal(root: Path) -> bool:
     journal_path = root / "uninstall-journal.json"
     if not journal_path.exists():
@@ -251,19 +273,7 @@ def recover_journal(root: Path) -> bool:
         managed = [Path(item["path"]).resolve() for item in receipt["managed_files"]]
         _finalize_uninstall(root, managed)
         return True
-    errors = []
-    for target, quarantine in reversed(entries):
-        if quarantine.exists() or quarantine.is_symlink():
-            if target.exists() or target.is_symlink():
-                raise RuntimeError(
-                    f"uninstall recovery target was recreated while quarantined: {target}"
-                )
-            try:
-                os.replace(quarantine, target)
-            except OSError as exc:
-                errors.append(exc)
-    if errors:
-        raise RuntimeError("uninstall recovery was incomplete: " + "; ".join(map(str, errors)))
+    _restore_quarantined(entries)
     journal_path.unlink(missing_ok=True)
     return True
 
@@ -313,16 +323,11 @@ def uninstall(root: Path) -> None:
             moved.append((target, quarantine))
             atomic_json(journal_path, journal)
     except BaseException as uninstall_error:
-        restore_errors = []
-        for target, quarantine in reversed(moved):
-            try:
-                os.replace(quarantine, target)
-            except OSError as exc:
-                restore_errors.append(exc)
-        if restore_errors:
+        try:
+            _restore_quarantined(moved)
+        except BaseException as recovery_error:
             raise RuntimeError(
-                "uninstall failed and recovery was incomplete: "
-                + "; ".join(map(str, restore_errors))
+                f"uninstall failed and recovery was incomplete: {recovery_error}"
             ) from uninstall_error
         journal_path.unlink(missing_ok=True)
         raise

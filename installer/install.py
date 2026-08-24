@@ -21,7 +21,7 @@ if str(_SOURCE_ROOT) not in sys.path:
 installer_lock = importlib.import_module("kikit_packer.install_lock").installer_lock
 
 RECEIPT_VERSION = 2
-INSTALL_JOURNAL_VERSION = 1
+INSTALL_JOURNAL_VERSION = 2
 
 
 def default_root() -> Path:
@@ -45,13 +45,16 @@ def source_hash(path: Path) -> str:
         return file_hash(path)
     digest = hashlib.sha256()
     included = []
+    excluded = {"build", "dist", "venv", "venv-ki", "__pycache__"}
     for candidate in path.rglob("*"):
         relative = candidate.relative_to(path)
-        if (
-            candidate.is_file()
-            and not candidate.is_symlink()
-            and not any(part.startswith(".") or part in {"build", "dist", "venv", "venv-ki", "__pycache__"} for part in relative.parts)
-        ):
+        ignored = any(
+            part.startswith(".")
+            or part in excluded
+            or part.endswith((".egg-info", ".dist-info"))
+            for part in relative.parts
+        )
+        if candidate.is_file() and not candidate.is_symlink() and not ignored:
             included.append((relative, candidate))
     for relative, candidate in sorted(included):
         digest.update(str(relative).encode("utf-8"))
@@ -172,16 +175,50 @@ def _owned_receipt(root: Path, payload_paths: list[Path]):
     return receipt
 
 
+def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def durable_makedirs(path: Path) -> None:
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    path.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        fsync_directory(created)
+        fsync_directory(created.parent)
+
+
+def durable_replace(source: Path, target: Path) -> None:
+    os.replace(source, target)
+    fsync_directory(target.parent)
+    if source.parent != target.parent:
+        fsync_directory(source.parent)
+
+
+def durable_unlink(path: Path) -> None:
+    path.unlink()
+    fsync_directory(path.parent)
+
+
 def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_makedirs(path.parent)
     descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
+            os.fchmod(handle.fileno(), mode)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
+        durable_replace(Path(temporary), path)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -197,6 +234,7 @@ def _remove_transaction_path(path: Path) -> None:
         if not path.is_dir():
             raise RuntimeError(f"install transaction path is not a directory: {path}")
         shutil.rmtree(path)
+        fsync_directory(path.parent)
 
 
 def _backup_record(path: Path, replacement: bytes) -> dict:
@@ -222,14 +260,16 @@ def _backup_record(path: Path, replacement: bytes) -> dict:
     }
 
 
-def _restore_install_backup(record: dict) -> None:
+def _restore_install_backup(record: dict, apply: bool = True) -> None:
     if set(record) != {
         "path", "existed", "data", "mode", "sha256", "replacement_sha256"
     }:
         raise RuntimeError("install journal backup schema is invalid")
     path = Path(record["path"])
-    if type(record["existed"]) is not bool:
-        raise RuntimeError("install journal backup existed flag is invalid")
+    if type(record["existed"]) is not bool or not re.fullmatch(
+        r"[0-9a-f]{64}", record.get("replacement_sha256", "")
+    ):
+        raise RuntimeError("install journal backup metadata is invalid")
     current_hash = None
     if path.exists() or path.is_symlink():
         if not path.is_file() or path.is_symlink():
@@ -237,7 +277,12 @@ def _restore_install_backup(record: dict) -> None:
         current_hash = file_hash(path)
     allowed = {record["replacement_sha256"]}
     if record["existed"]:
-        if type(record["data"]) is not str or type(record["mode"]) is not int:
+        if (
+            type(record["data"]) is not str
+            or type(record["mode"]) is not int
+            or not 0 <= record["mode"] <= 0o777
+            or not re.fullmatch(r"[0-9a-f]{64}", record.get("sha256", ""))
+        ):
             raise RuntimeError("install journal backup payload is invalid")
         try:
             data = base64.b64decode(record["data"], validate=True)
@@ -248,15 +293,24 @@ def _restore_install_backup(record: dict) -> None:
         allowed.add(record["sha256"])
         if current_hash not in allowed and current_hash is not None:
             raise RuntimeError(f"installer recovery target changed after interruption: {path}")
-        if current_hash != record["sha256"]:
+        if apply and current_hash != record["sha256"]:
             atomic_write(path, data, record["mode"])
     else:
         if record["data"] is not None or record["mode"] is not None or record["sha256"] is not None:
             raise RuntimeError("install journal absent backup is invalid")
         if current_hash is not None and current_hash not in allowed:
             raise RuntimeError(f"installer recovery target changed after interruption: {path}")
-        if current_hash is not None:
-            path.unlink()
+        if apply and current_hash is not None:
+            durable_unlink(path)
+
+
+def _install_backup_targets(root: Path, payload_paths: list[Path]) -> list[Path]:
+    return [
+        root / "current.txt",
+        *payload_paths,
+        root / "install-receipt.json",
+        root / "install-receipt.sha256",
+    ]
 
 
 def recover_install_journal(root: Path, payload_paths: list[Path]) -> bool:
@@ -267,54 +321,76 @@ def recover_install_journal(root: Path, payload_paths: list[Path]) -> bool:
         raise RuntimeError("install journal is unsafe")
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
     if set(journal) != {
-        "schema_version", "install_root", "identity_sha256", "staging", "final",
-        "committed", "backups",
+        "schema_version",
+        "install_root",
+        "identity_sha256",
+        "version",
+        "staging",
+        "final",
+        "phase",
+        "backups",
     }:
         raise RuntimeError("install journal schema is invalid")
     if journal["schema_version"] != INSTALL_JOURNAL_VERSION:
         raise RuntimeError("unsupported install journal version")
-    if Path(journal["install_root"]).resolve() != root.resolve():
+    canonical_root = root.resolve()
+    if journal["install_root"] != str(canonical_root):
         raise RuntimeError("install journal root mismatch")
-    if type(journal["identity_sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", journal["identity_sha256"]):
+    identity_sha256 = journal["identity_sha256"]
+    version = journal["version"]
+    if type(identity_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", identity_sha256):
         raise RuntimeError("install journal identity is invalid")
-    if type(journal["committed"]) is not bool or not isinstance(journal["backups"], list):
-        raise RuntimeError("install journal state is invalid")
-    versions = (root / "versions").resolve()
-    staging = Path(journal["staging"])
-    final = Path(journal["final"])
-    for path, prefix in ((staging, ".install-"), (final, "")):
-        try:
-            path.resolve().relative_to(versions)
-        except ValueError as exc:
-            raise RuntimeError("install journal path escapes version store") from exc
-        invalid_name = path.name.startswith(".") if prefix == "" else not path.name.startswith(prefix)
-        if path.parent.resolve() != versions or invalid_name:
-            raise RuntimeError("install journal transaction path is invalid")
-    expected_paths = {
-        str(path.resolve())
-        for path in [
-            root / "current.txt",
-            root / "install-receipt.json",
-            root / "install-receipt.sha256",
-            *payload_paths,
-        ]
-    }
+    if type(version) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise RuntimeError("install journal version is invalid")
+    phase = journal["phase"]
     backups = journal["backups"]
-    if backups and {record.get("path") for record in backups if isinstance(record, dict)} != expected_paths:
-        raise RuntimeError("install journal backup target set mismatch")
-    if journal["committed"]:
+    if phase not in {"building", "promoting", "committed"} or not isinstance(backups, list):
+        raise RuntimeError("install journal state is invalid")
+    install_id = identity_sha256[:24]
+    versions = canonical_root / "versions"
+    expected_staging = versions / f".install-{install_id}"
+    expected_final = versions / f"{version}-{install_id}"
+    if journal["staging"] != str(expected_staging) or journal["final"] != str(expected_final):
+        raise RuntimeError("install journal transaction path is not identity-derived")
+    staging = expected_staging
+    final = expected_final
+    expected_paths = [str(path.resolve()) for path in _install_backup_targets(root, payload_paths)]
+    if phase == "building":
+        if backups:
+            raise RuntimeError("building install journal has unexpected backups")
+    else:
+        if (
+            len(backups) != len(expected_paths)
+            or len(set(expected_paths)) != len(expected_paths)
+            or any(not isinstance(record, dict) for record in backups)
+            or [record.get("path") for record in backups] != expected_paths
+        ):
+            raise RuntimeError("install journal backup target list mismatch")
+        for record in backups:
+            _restore_install_backup(record, apply=False)
+    if phase == "committed":
+        for record in backups:
+            path = Path(record["path"])
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or file_hash(path) != record["replacement_sha256"]
+            ):
+                raise RuntimeError(f"committed install target is incomplete or changed: {path}")
+        if not final.is_dir() or final.is_symlink():
+            raise RuntimeError("committed install version is missing or unsafe")
         _remove_transaction_path(staging)
-        journal_path.unlink()
+        durable_unlink(journal_path)
         return True
-    for record in reversed(backups):
-        if not isinstance(record, dict):
-            raise RuntimeError("install journal backup record is invalid")
-        _restore_install_backup(record)
+    if phase == "promoting":
+        for record in reversed(backups):
+            _restore_install_backup(record)
     _remove_transaction_path(staging)
     _remove_transaction_path(final)
-    journal_path.unlink()
+    durable_unlink(journal_path)
     try:
         (root / "versions").rmdir()
+        fsync_directory(root)
     except OSError:
         pass
     return True
@@ -509,6 +585,8 @@ def _install_locked(
     lock = dependency_lock(interpreter)
     build_lock = build_dependency_lock(lock)
     version = source_version(source)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise RuntimeError("package version is unsafe for an install path")
     identity = {
         "version": version,
         "source_sha256": actual_source_hash,
@@ -522,31 +600,34 @@ def _install_locked(
     install_id = identity_sha256[:24]
     if prior is not None and prior.get("identity_sha256") == identity_sha256:
         return payloads[0][0]
-    versions = root / "versions"
-    versions.mkdir(exist_ok=True)
+    canonical_root = root.resolve()
+    versions = canonical_root / "versions"
+    durable_makedirs(versions)
     staging = versions / f".install-{install_id}"
     final = versions / (version + "-" + install_id)
     if staging.exists() or staging.is_symlink() or final.exists() or final.is_symlink():
         raise RuntimeError("deterministic install transaction path already exists")
-    journal_path = root / "install-journal.json"
+    journal_path = canonical_root / "install-journal.json"
     journal = {
         "schema_version": INSTALL_JOURNAL_VERSION,
-        "install_root": str(root.resolve()),
+        "install_root": str(canonical_root),
         "identity_sha256": identity_sha256,
-        "staging": str(staging.resolve()),
-        "final": str(final.resolve()),
-        "committed": False,
+        "version": version,
+        "staging": str(staging),
+        "final": str(final),
+        "phase": "building",
         "backups": [],
     }
-    staging.mkdir()
-    atomic_write(
-        journal_path,
-        (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
-        0o600,
-    )
     environment = staging / "venv"
     backups = []
     try:
+        atomic_write(
+            journal_path,
+            (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+            0o600,
+        )
+        staging.mkdir()
+        fsync_directory(versions)
         subprocess.run(
             [str(interpreter), "-m", "venv", "--system-site-packages", str(environment)], check=True
         )
@@ -734,21 +815,22 @@ def _install_locked(
         ]
         backups = [_backup_record(path, data) for path, data, _ in writes]
         journal["backups"] = backups
+        journal["phase"] = "promoting"
         atomic_write(
             journal_path,
             (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             0o600,
         )
-        os.replace(str(staging), str(final))
+        durable_replace(staging, final)
         for path, data, mode in writes:
             atomic_write(path, data, mode)
-        journal["committed"] = True
+        journal["phase"] = "committed"
         atomic_write(
             journal_path,
             (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             0o600,
         )
-        journal_path.unlink()
+        durable_unlink(journal_path)
         return payloads[0][0]
     except BaseException as install_error:
         try:
@@ -766,7 +848,7 @@ def install(
     root: Path,
     expected_source_sha256: str = "",
 ) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
+    durable_makedirs(root)
     with installer_lock(root):
         return _install_locked(interpreter, source, root, expected_source_sha256)
 

@@ -207,13 +207,17 @@ def test_install_rejects_unowned_version_store(tmp_path: Path):
         module._owned_receipt(root, [])
 
 
-def test_source_identity_includes_package_json(tmp_path: Path):
+def test_source_identity_includes_package_json_but_excludes_build_metadata(tmp_path: Path):
     module = load("install_source_identity", ROOT / "installer/install.py")
     source = tmp_path / "source"
     (source / "kikit_packer").mkdir(parents=True)
     preset = source / "kikit_packer/kikit_181_preset.json"
     preset.write_text('{"value":1}')
     before = module.source_hash(source)
+    egg_info = source / "kikit_packer.egg-info"
+    egg_info.mkdir()
+    (egg_info / "SOURCES.txt").write_text("generated")
+    assert module.source_hash(source) == before
     preset.write_text('{"value":2}')
     assert module.source_hash(source) != before
 
@@ -244,9 +248,10 @@ def test_install_journal_removes_owned_orphans_on_replay(tmp_path: Path):
         "schema_version": module.INSTALL_JOURNAL_VERSION,
         "install_root": str(root.resolve()),
         "identity_sha256": "a" * 64,
+        "version": "0.1.0",
         "staging": str(staging.resolve()),
         "final": str(final.resolve()),
-        "committed": False,
+        "phase": "building",
         "backups": [],
     }
     module.atomic_write(
@@ -281,9 +286,10 @@ def test_install_recovery_rejects_changed_replacement(tmp_path: Path):
         "schema_version": module.INSTALL_JOURNAL_VERSION,
         "install_root": str(root.resolve()),
         "identity_sha256": "b" * 64,
+        "version": "0.1.0",
         "staging": str(staging.resolve()),
         "final": str(final.resolve()),
-        "committed": False,
+        "phase": "promoting",
         "backups": backups,
     }
     module.atomic_write(
@@ -294,6 +300,118 @@ def test_install_recovery_rejects_changed_replacement(tmp_path: Path):
         module.recover_install_journal(root, [])
     assert current.read_bytes() == b"user replacement"
     assert staging.is_dir()
+
+
+def test_install_journal_cannot_delete_a_non_identity_version(tmp_path: Path):
+    module = load("install_journal_identity", ROOT / "installer/install.py")
+    root = tmp_path / "root"
+    versions = root / "versions"
+    retained = versions / "retained-version"
+    retained.mkdir(parents=True)
+    identity = "c" * 64
+    journal = {
+        "schema_version": module.INSTALL_JOURNAL_VERSION,
+        "install_root": str(root.resolve()),
+        "identity_sha256": identity,
+        "version": "0.1.0",
+        "staging": str((versions / (".install-" + identity[:24])).resolve()),
+        "final": str(retained.resolve()),
+        "phase": "building",
+        "backups": [],
+    }
+    module.atomic_write(
+        root / "install-journal.json",
+        (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode(),
+    )
+    with pytest.raises(RuntimeError, match="not identity-derived"):
+        module.recover_install_journal(root, [])
+    assert retained.is_dir()
+
+
+def test_install_journal_rejects_duplicate_backup_targets(tmp_path: Path):
+    module = load("install_journal_duplicates", ROOT / "installer/install.py")
+    root = tmp_path / "root"
+    versions = root / "versions"
+    identity = "d" * 64
+    staging = versions / (".install-" + identity[:24])
+    final = versions / ("0.1.0-" + identity[:24])
+    staging.mkdir(parents=True)
+    targets = [
+        root / "current.txt",
+        root / "install-receipt.json",
+        root / "install-receipt.sha256",
+    ]
+    backups = [module._backup_record(path, b"replacement") for path in targets]
+    backups[-1] = dict(backups[0])
+    journal = {
+        "schema_version": module.INSTALL_JOURNAL_VERSION,
+        "install_root": str(root.resolve()),
+        "identity_sha256": identity,
+        "version": "0.1.0",
+        "staging": str(staging.resolve()),
+        "final": str(final.resolve()),
+        "phase": "promoting",
+        "backups": backups,
+    }
+    module.atomic_write(
+        root / "install-journal.json",
+        (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode(),
+    )
+    with pytest.raises(RuntimeError, match="target list mismatch"):
+        module.recover_install_journal(root, [])
+    assert staging.is_dir()
+
+
+def test_staging_creation_failure_replays_initial_journal(tmp_path: Path, monkeypatch):
+    module = load("install_staging_failure", ROOT / "installer/install.py")
+    root = tmp_path / "root"
+    source = tmp_path / "source"
+    source.mkdir()
+    lock = tmp_path / "runtime.txt"
+    build_lock = tmp_path / "build.txt"
+    lock.write_text("")
+    build_lock.write_text("")
+    monkeypatch.setattr(module, "external_payloads", lambda _root: [])
+    monkeypatch.setattr(module, "runtime_identity", lambda _python: {})
+    monkeypatch.setattr(module, "dependency_lock", lambda _python: lock)
+    monkeypatch.setattr(module, "build_dependency_lock", lambda _lock: build_lock)
+    monkeypatch.setattr(module, "source_hash", lambda _source: "e" * 64)
+    monkeypatch.setattr(module, "source_version", lambda _source: "0.1.0")
+    original_mkdir = Path.mkdir
+
+    def fail_staging(path, *args, **kwargs):
+        if path.name.startswith(".install-"):
+            assert (root / "install-journal.json").is_file()
+            raise OSError("staging creation failed")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_staging)
+    with pytest.raises(OSError, match="staging creation failed"):
+        module._install_locked(Path("python"), source, root)
+    assert not (root / "install-journal.json").exists()
+    assert not (root / "versions").exists()
+
+
+def test_atomic_install_write_fsyncs_parent_directory(tmp_path: Path, monkeypatch):
+    module = load("install_atomic_fsync", ROOT / "installer/install.py")
+    calls = []
+    monkeypatch.setattr(module, "fsync_directory", calls.append)
+    target = tmp_path / "state.json"
+    module.atomic_write(target, b"state")
+    assert target.read_bytes() == b"state"
+    assert tmp_path in calls
+
+
+def test_same_process_uninstall_restore_rejects_recreated_target(tmp_path: Path):
+    module = load("uninstall_same_process", ROOT / "kikit_packer/uninstall.py")
+    target = tmp_path / "launcher"
+    quarantine = tmp_path / ".launcher.uninstall-123456abcdef"
+    quarantine.write_text("owned")
+    target.write_text("replacement")
+    with pytest.raises(RuntimeError, match="recreated"):
+        module._restore_quarantined([(target, quarantine)])
+    assert target.read_text() == "replacement"
+    assert quarantine.read_text() == "owned"
 
 
 def test_uninstall_recovery_rejects_recreated_target(tmp_path: Path, monkeypatch):
