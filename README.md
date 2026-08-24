@@ -13,15 +13,24 @@ snapshots, output verification, and rollback-safe project promotion.
 The currently tested development environment is macOS arm64 with KiCad 10.0.5 and KiKit 1.8.1.
 Other platform/version combinations remain provisional until their release smoke tests pass.
 
-## Install from a source checkout
+## Install on macOS
 
-The tested macOS arm64/Python 3.9 bootstrap discovers KiCad's Python, creates a user-local
-environment with `--system-site-packages`, installs a complete hash-locked dependency set without
-build isolation, runs `doctor`, and creates `~/.local/bin/kikit-packer`:
+Install the reviewed branch with one command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fl4p/kikit-packer/feat/kikit-packer-verified-app/installer/bootstrap-macos.sh | /bin/sh
+```
+
+The bootstrap downloads the immutable reviewed source archive and verifies its SHA-256 before
+running it. To install from an existing source checkout instead:
 
 ```sh
 ./installer/install-macos.sh
 ```
+
+The tested macOS arm64/Python 3.9 installer discovers KiCad's Python, creates a user-local
+environment with `--system-site-packages`, installs a complete hash-locked dependency set without
+build isolation, runs `doctor`, and creates `~/.local/bin/kikit-packer`.
 
 A local source directory is treated as trusted development input. Release wheel installation also
 requires its published SHA-256:
