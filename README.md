@@ -15,22 +15,23 @@ Other platform/version combinations remain provisional until their release smoke
 
 ## Install on macOS
 
-Install the reviewed branch with one command:
+Install the reviewed application with one command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fl4p/kikit-packer/feat/kikit-packer-verified-app/installer/bootstrap-macos.sh | /bin/sh
+curl -fsSL https://raw.githubusercontent.com/fl4p/kikit-packer/c3e8fa8a833cfad157c97fd4f8319c8299a2e898/installer/bootstrap-macos.sh | /bin/sh
 ```
 
-The bootstrap downloads the immutable reviewed source archive and verifies its SHA-256 before
-running it. To install from an existing source checkout instead:
+The command fetches the bootstrap from an immutable commit. The bootstrap then downloads the
+reviewed application commit and verifies its SHA-256 before running it. To install from an existing source checkout instead:
 
 ```sh
 ./installer/install-macos.sh
 ```
 
 The tested macOS arm64/Python 3.9 installer discovers KiCad's Python, creates a user-local
-environment with `--system-site-packages`, installs a complete hash-locked dependency set without
-build isolation, runs `doctor`, and creates `~/.local/bin/kikit-packer`.
+environment with `--system-site-packages`, inherits only KiCad's protected `pcbnew` and `wx`
+modules, and forces the complete hash-locked build/runtime dependency sets into that environment.
+It then runs `doctor` and creates `~/.local/bin/kikit-packer`.
 
 A local source directory is treated as trusted development input. Release wheel installation also
 requires its published SHA-256:
@@ -163,14 +164,20 @@ compatibility bootstrap; panel logic lives in `kikit_packer`.
 
 ## Uninstall
 
-The installer prints its install root. Preview receipt-bounded removal first:
+A one-line or checkout installation creates a receipt-owned uninstaller. Preview receipt-bounded
+removal first:
 
 ```sh
-python3 installer/uninstall.py --root "$HOME/Library/Application Support/KiKit Packer"
+~/.local/bin/kikit-packer-uninstall
 ```
 
-Add `--yes` to remove only the receipt-recorded launchers and current or retained version
-environments. A modified launcher or receipt aborts before any removal. User YAML files, generated
+Add `--yes` to perform removal:
+
+```sh
+~/.local/bin/kikit-packer-uninstall --yes
+```
+
+It removes only the receipt-recorded launchers and current or retained version environments. A modified launcher or receipt aborts before any removal. User YAML files, generated
 panels, and KiCad itself are never removed.
 
 ## Development
