@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -10,10 +12,16 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from contextlib import contextmanager
 from pathlib import Path
 
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+if str(_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_ROOT))
+
+installer_lock = importlib.import_module("kikit_packer.install_lock").installer_lock
+
 RECEIPT_VERSION = 2
+INSTALL_JOURNAL_VERSION = 1
 
 
 def default_root() -> Path:
@@ -112,28 +120,6 @@ print(json.dumps({
     return result
 
 
-@contextmanager
-def installer_lock(_root: Path):
-    if os.name == "nt":
-        path = Path(os.environ["LOCALAPPDATA"]) / ".kikit-packer-installer.lock"
-    else:
-        path = Path.home() / ".local/share/.kikit-packer-installer.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError("another installer transaction is active") from exc
-    try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.close(descriptor)
-        yield
-    finally:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def _owned_receipt(root: Path, payload_paths: list[Path]):
     receipt_path = root / "install-receipt.json"
     receipt_hash_path = root / "install-receipt.sha256"
@@ -159,8 +145,13 @@ def _owned_receipt(root: Path, payload_paths: list[Path]):
         raise RuntimeError("install receipt ownership mismatch")
     expected_paths = {str(path.resolve()) for path in payload_paths}
     managed = receipt.get("managed_files", [])
-    if {item.get("path") for item in managed} != expected_paths:
+    managed_paths = {item.get("path") for item in managed}
+    if not managed_paths.issubset(expected_paths):
         raise RuntimeError("install receipt launcher set mismatch")
+    for missing in expected_paths - managed_paths:
+        path = Path(missing)
+        if path.exists() or path.is_symlink():
+            raise RuntimeError("an added launcher path exists without receipt ownership")
     for item in managed:
         path = Path(item["path"])
         if not path.is_file() or path.is_symlink() or file_hash(path) != item["sha256"]:
@@ -197,6 +188,136 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _remove_transaction_path(path: Path) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"install transaction path is a symlink: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise RuntimeError(f"install transaction path is not a directory: {path}")
+        shutil.rmtree(path)
+
+
+def _backup_record(path: Path, replacement: bytes) -> dict:
+    if path.exists() or path.is_symlink():
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"installer-managed path is not a regular file: {path}")
+        data = path.read_bytes()
+        return {
+            "path": str(path.resolve()),
+            "existed": True,
+            "data": base64.b64encode(data).decode("ascii"),
+            "mode": path.stat().st_mode & 0o777,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+        }
+    return {
+        "path": str(path.resolve()),
+        "existed": False,
+        "data": None,
+        "mode": None,
+        "sha256": None,
+        "replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+    }
+
+
+def _restore_install_backup(record: dict) -> None:
+    if set(record) != {
+        "path", "existed", "data", "mode", "sha256", "replacement_sha256"
+    }:
+        raise RuntimeError("install journal backup schema is invalid")
+    path = Path(record["path"])
+    if type(record["existed"]) is not bool:
+        raise RuntimeError("install journal backup existed flag is invalid")
+    current_hash = None
+    if path.exists() or path.is_symlink():
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"installer recovery target is unsafe: {path}")
+        current_hash = file_hash(path)
+    allowed = {record["replacement_sha256"]}
+    if record["existed"]:
+        if type(record["data"]) is not str or type(record["mode"]) is not int:
+            raise RuntimeError("install journal backup payload is invalid")
+        try:
+            data = base64.b64decode(record["data"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("install journal backup encoding is invalid") from exc
+        if hashlib.sha256(data).hexdigest() != record["sha256"]:
+            raise RuntimeError("install journal backup hash mismatch")
+        allowed.add(record["sha256"])
+        if current_hash not in allowed and current_hash is not None:
+            raise RuntimeError(f"installer recovery target changed after interruption: {path}")
+        if current_hash != record["sha256"]:
+            atomic_write(path, data, record["mode"])
+    else:
+        if record["data"] is not None or record["mode"] is not None or record["sha256"] is not None:
+            raise RuntimeError("install journal absent backup is invalid")
+        if current_hash is not None and current_hash not in allowed:
+            raise RuntimeError(f"installer recovery target changed after interruption: {path}")
+        if current_hash is not None:
+            path.unlink()
+
+
+def recover_install_journal(root: Path, payload_paths: list[Path]) -> bool:
+    journal_path = root / "install-journal.json"
+    if not journal_path.exists():
+        return False
+    if not journal_path.is_file() or journal_path.is_symlink():
+        raise RuntimeError("install journal is unsafe")
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if set(journal) != {
+        "schema_version", "install_root", "identity_sha256", "staging", "final",
+        "committed", "backups",
+    }:
+        raise RuntimeError("install journal schema is invalid")
+    if journal["schema_version"] != INSTALL_JOURNAL_VERSION:
+        raise RuntimeError("unsupported install journal version")
+    if Path(journal["install_root"]).resolve() != root.resolve():
+        raise RuntimeError("install journal root mismatch")
+    if type(journal["identity_sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", journal["identity_sha256"]):
+        raise RuntimeError("install journal identity is invalid")
+    if type(journal["committed"]) is not bool or not isinstance(journal["backups"], list):
+        raise RuntimeError("install journal state is invalid")
+    versions = (root / "versions").resolve()
+    staging = Path(journal["staging"])
+    final = Path(journal["final"])
+    for path, prefix in ((staging, ".install-"), (final, "")):
+        try:
+            path.resolve().relative_to(versions)
+        except ValueError as exc:
+            raise RuntimeError("install journal path escapes version store") from exc
+        invalid_name = path.name.startswith(".") if prefix == "" else not path.name.startswith(prefix)
+        if path.parent.resolve() != versions or invalid_name:
+            raise RuntimeError("install journal transaction path is invalid")
+    expected_paths = {
+        str(path.resolve())
+        for path in [
+            root / "current.txt",
+            root / "install-receipt.json",
+            root / "install-receipt.sha256",
+            *payload_paths,
+        ]
+    }
+    backups = journal["backups"]
+    if backups and {record.get("path") for record in backups if isinstance(record, dict)} != expected_paths:
+        raise RuntimeError("install journal backup target set mismatch")
+    if journal["committed"]:
+        _remove_transaction_path(staging)
+        journal_path.unlink()
+        return True
+    for record in reversed(backups):
+        if not isinstance(record, dict):
+            raise RuntimeError("install journal backup record is invalid")
+        _restore_install_backup(record)
+    _remove_transaction_path(staging)
+    _remove_transaction_path(final)
+    journal_path.unlink()
+    try:
+        (root / "versions").rmdir()
+    except OSError:
+        pass
+    return True
 
 
 def probe(interpreter: Path, timeout: float = 15) -> bool:
@@ -251,6 +372,53 @@ def dependency_lock(interpreter: Path) -> Path:
     )
 
 
+def build_dependency_lock(lock: Path) -> Path:
+    build_lock = lock.with_name(lock.name.replace("requirements-", "requirements-build-"))
+    if not build_lock.is_file():
+        raise RuntimeError(f"hash-locked build dependency set is missing: {build_lock}")
+    return build_lock
+
+
+def locked_distribution_names(*locks: Path) -> list[str]:
+    names = []
+    for lock in locks:
+        for line in lock.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^([A-Za-z0-9_.-]+)==", line)
+            if match is not None:
+                names.append(re.sub(r"[-_.]+", "-", match.group(1)).lower())
+    return sorted(set(names))
+
+
+def verify_locked_distribution_origins(python: Path, environment: Path, locks: list[Path], cwd: Path) -> None:
+    code = r'''import importlib.metadata,json,pathlib,re,sysconfig
+root=pathlib.Path(sysconfig.get_paths()["purelib"]).resolve()
+def normalized(value): return re.sub(r"[-_.]+", "-", value).lower()
+found={normalized(item.metadata["Name"]): str(pathlib.Path(item.locate_file("")).resolve()) for item in importlib.metadata.distributions(path=[str(root)])}
+print(json.dumps({"root": str(root), "found": found}, sort_keys=True))'''
+    process = subprocess.run(
+        [str(python), "-c", code],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result = json.loads(process.stdout)
+    purelib = Path(result["root"]).resolve()
+    try:
+        purelib.relative_to(environment.resolve())
+    except ValueError as exc:
+        raise RuntimeError("staged purelib escapes managed environment") from exc
+    found = result["found"]
+    for name in locked_distribution_names(*locks):
+        origin = found.get(name)
+        if origin is None:
+            raise RuntimeError(f"locked distribution is missing from managed environment: {name}")
+        try:
+            Path(origin).resolve().relative_to(purelib)
+        except ValueError as exc:
+            raise RuntimeError(f"locked distribution escaped managed environment: {name}={origin}") from exc
+
+
 def shell_launcher(root: Path, gui: bool = False) -> bytes:
     command = "gui " if gui else ""
     return (
@@ -259,6 +427,18 @@ def shell_launcher(root: Path, gui: bool = False) -> bytes:
         "CURRENT=$(cat {})\n"
         "exec \"$CURRENT/venv/bin/python\" -m kikit_packer {}\"$@\"\n".format(
             shlex.quote(str(root / "current.txt")), command
+        )
+    ).encode("utf-8")
+
+
+def shell_uninstaller(root: Path) -> bytes:
+    return (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "CURRENT=$(cat {})\n"
+        "exec \"$CURRENT/venv/bin/python\" -m kikit_packer.uninstall --root {} \"$@\"\n".format(
+            shlex.quote(str(root / "current.txt")),
+            shlex.quote(str(root)),
         )
     ).encode("utf-8")
 
@@ -272,6 +452,12 @@ def external_payloads(root: Path):
             '@"%CURRENT%\\venv\\Scripts\\python.exe" -m kikit_packer %*\r\n'
         ).format(root / "current.txt")
         payloads.append((launcher, command.encode("utf-8"), 0o644))
+        uninstaller = root / "bin/kikit-packer-uninstall.cmd"
+        uninstall_command = (
+            '@for /f "usebackq delims=" %%i in ("{}") do @set "CURRENT=%%i"\r\n'
+            '@"%CURRENT%\\venv\\Scripts\\python.exe" -m kikit_packer.uninstall --root "{}" %*\r\n'
+        ).format(root / "current.txt", root)
+        payloads.append((uninstaller, uninstall_command.encode("utf-8"), 0o644))
         start_menu = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs"
         gui = start_menu / "KiKit Packer.cmd"
         gui_command = command.replace("kikit_packer %*", "kikit_packer gui %*")
@@ -279,6 +465,8 @@ def external_payloads(root: Path):
     else:
         launcher = Path.home() / ".local/bin/kikit-packer"
         payloads.append((launcher, shell_launcher(root), 0o755))
+        uninstaller = Path.home() / ".local/bin/kikit-packer-uninstall"
+        payloads.append((uninstaller, shell_uninstaller(root), 0o755))
         if sys.platform == "darwin":
             contents = Path.home() / "Applications/KiKit Packer.app/Contents"
             payloads.append((contents / "MacOS/kikit-packer", shell_launcher(root, gui=True), 0o755))
@@ -314,14 +502,18 @@ def _install_locked(
     if source.is_file() and actual_source_hash != expected_source_sha256.lower():
         raise RuntimeError("source artifact SHA-256 mismatch")
     payloads = external_payloads(root)
-    prior = _owned_receipt(root, [path for path, _, _ in payloads])
+    payload_paths = [path for path, _, _ in payloads]
+    recover_install_journal(root, payload_paths)
+    prior = _owned_receipt(root, payload_paths)
     runtime = runtime_identity(interpreter)
     lock = dependency_lock(interpreter)
+    build_lock = build_dependency_lock(lock)
     version = source_version(source)
     identity = {
         "version": version,
         "source_sha256": actual_source_hash,
         "dependency_lock_sha256": file_hash(lock),
+        "build_dependency_lock_sha256": file_hash(build_lock),
         "runtime": runtime,
     }
     identity_sha256 = hashlib.sha256(
@@ -332,29 +524,50 @@ def _install_locked(
         return payloads[0][0]
     versions = root / "versions"
     versions.mkdir(exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".install-", dir=str(versions)))
+    staging = versions / f".install-{install_id}"
+    final = versions / (version + "-" + install_id)
+    if staging.exists() or staging.is_symlink() or final.exists() or final.is_symlink():
+        raise RuntimeError("deterministic install transaction path already exists")
+    journal_path = root / "install-journal.json"
+    journal = {
+        "schema_version": INSTALL_JOURNAL_VERSION,
+        "install_root": str(root.resolve()),
+        "identity_sha256": identity_sha256,
+        "staging": str(staging.resolve()),
+        "final": str(final.resolve()),
+        "committed": False,
+        "backups": [],
+    }
+    staging.mkdir()
+    atomic_write(
+        journal_path,
+        (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        0o600,
+    )
     environment = staging / "venv"
-    final = None
-    backups = {}
+    backups = []
     try:
         subprocess.run(
             [str(interpreter), "-m", "venv", "--system-site-packages", str(environment)], check=True
         )
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--require-hashes",
-                "--no-deps",
-                "--no-build-isolation",
-                "-r",
-                str(lock),
-            ],
-            check=True,
-        )
+        for requirement_lock in (build_lock, lock):
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "--ignore-installed",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "-r",
+                    str(requirement_lock),
+                ],
+                cwd=staging,
+                check=True,
+            )
         subprocess.run(
             [
                 str(python),
@@ -365,7 +578,14 @@ def _install_locked(
                 "--no-build-isolation",
                 str(source),
             ],
-            check=True
+            cwd=staging,
+            check=True,
+        )
+        verify_locked_distribution_origins(
+            python,
+            environment,
+            [build_lock, lock],
+            staging,
         )
         doctor = subprocess.run(
             [str(python), "-m", "kikit_packer", "doctor", "--json"],
@@ -465,27 +685,10 @@ def _install_locked(
         ).stdout.strip()
         if installed_version != version:
             raise RuntimeError("installed package version differs from source metadata")
-        final = versions / (version + "-" + install_id)
-        if final.exists():
-            raise RuntimeError("deterministic version root exists without matching ownership receipt")
-        os.replace(str(staging), str(final))
-        current = root / "current.txt"
-        receipt_path = root / "install-receipt.json"
-        receipt_hash_path = root / "install-receipt.sha256"
-        external = [current, receipt_path, receipt_hash_path] + [path for path, _, _ in payloads]
-        for path in external:
-            if path.exists() and path.is_file() and not path.is_symlink():
-                backups[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
-            elif path.exists() or path.is_symlink():
-                raise RuntimeError(f"installer-managed path is not a regular file: {path}")
-            else:
-                backups[path] = None
-        atomic_write(current, (str(final.resolve()) + "\n").encode("utf-8"), 0o600)
-        for path, data, mode in payloads:
-            atomic_write(path, data, mode)
         package_versions = json.loads(
             subprocess.run(
-                [str(final / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")), "-m", "pip", "list", "--format=json"],
+                [str(python), "-m", "pip", "list", "--format=json"],
+                cwd=staging,
                 capture_output=True,
                 text=True,
                 check=True,
@@ -508,28 +711,52 @@ def _install_locked(
             "source": str(source.resolve()),
             "source_sha256": actual_source_hash,
             "dependency_lock_sha256": file_hash(lock),
+            "build_dependency_lock_sha256": file_hash(build_lock),
             "packages": package_versions,
             "managed_files": [
-                {"path": str(path.resolve()), "sha256": file_hash(path)}
-                for path, _, _ in payloads
+                {
+                    "path": str(path.resolve()),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+                for path, data, _ in payloads
             ],
         }
         receipt_bytes = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
-        atomic_write(receipt_path, receipt_bytes, 0o600)
-        atomic_write(receipt_hash_path, (hashlib.sha256(receipt_bytes).hexdigest() + "\n").encode("ascii"), 0o600)
+        receipt_hash_bytes = (hashlib.sha256(receipt_bytes).hexdigest() + "\n").encode("ascii")
+        current = root / "current.txt"
+        receipt_path = root / "install-receipt.json"
+        receipt_hash_path = root / "install-receipt.sha256"
+        writes = [
+            (current, (str(final.resolve()) + "\n").encode("utf-8"), 0o600),
+            *payloads,
+            (receipt_path, receipt_bytes, 0o600),
+            (receipt_hash_path, receipt_hash_bytes, 0o600),
+        ]
+        backups = [_backup_record(path, data) for path, data, _ in writes]
+        journal["backups"] = backups
+        atomic_write(
+            journal_path,
+            (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+            0o600,
+        )
+        os.replace(str(staging), str(final))
+        for path, data, mode in writes:
+            atomic_write(path, data, mode)
+        journal["committed"] = True
+        atomic_write(
+            journal_path,
+            (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+            0o600,
+        )
+        journal_path.unlink()
         return payloads[0][0]
-    except BaseException:
-        for path, backup in reversed(list(backups.items())):
-            try:
-                if backup is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    atomic_write(path, backup[0], backup[1])
-            except OSError:
-                pass
-        if final is not None:
-            shutil.rmtree(final, ignore_errors=True)
-        shutil.rmtree(staging, ignore_errors=True)
+    except BaseException as install_error:
+        try:
+            recover_install_journal(root, payload_paths)
+        except BaseException as recovery_error:
+            raise RuntimeError(
+                f"installation failed and recovery was incomplete: {recovery_error}"
+            ) from install_error
         raise
 
 
