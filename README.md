@@ -18,7 +18,7 @@ Other platform/version combinations remain provisional until their release smoke
 Install the reviewed application with one command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fl4p/kikit-packer/b2a89e7086bef615d01ada3d42279bfe5b12c805/installer/bootstrap-macos.sh | /bin/sh
+curl -fsSL https://raw.githubusercontent.com/fl4p/kikit-packer/3f649633ceca67d9b991463ba4abd207abfcdd3e/installer/bootstrap-macos.sh | /bin/sh
 ```
 
 The command fetches the bootstrap from an immutable commit. The bootstrap then downloads the
