@@ -78,6 +78,30 @@ def _within(path: Path, roots) -> bool:
     return False
 
 
+def _remove_empty_managed_parents(paths, roots) -> None:
+    canonical_roots = [root.resolve() for root in roots]
+    for path in paths:
+        parent = path.parent.resolve()
+        boundaries = []
+        for root in canonical_roots:
+            try:
+                parent.relative_to(root)
+                boundaries.append(root)
+            except ValueError:
+                pass
+        if not boundaries:
+            continue
+        boundary = max(boundaries, key=lambda value: len(value.parts))
+        while parent != boundary:
+            try:
+                parent.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                break
+            parent = parent.parent
+
+
 def load_receipt(root: Path):
     receipt_path = root / "install-receipt.json"
     receipt_hash_path = root / "install-receipt.sha256"
@@ -316,6 +340,7 @@ def uninstall(root: Path) -> None:
         except OSError:
             return
     journal_path.unlink(missing_ok=True)
+    _remove_empty_managed_parents(managed, allowed_external_roots(root))
     try:
         (root / "versions").rmdir()
         root.rmdir()

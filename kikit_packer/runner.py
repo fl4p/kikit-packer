@@ -447,7 +447,7 @@ def _process_group_exists(process: subprocess.Popen) -> bool:
     try:
         os.killpg(process.pid, 0)
         return True
-    except ProcessLookupError:
+    except (PermissionError, ProcessLookupError):
         return False
 
 
@@ -466,6 +466,9 @@ def _terminate_process_tree(process: subprocess.Popen, windows_job=None) -> None
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if process.poll() is None:
+                raise
     deadline = time.monotonic() + 3
     while _process_group_exists(process) and time.monotonic() < deadline:
         if process.poll() is None:

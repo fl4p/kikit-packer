@@ -183,6 +183,21 @@ def test_uninstall_recovery_rejects_string_committed_without_deleting(tmp_path: 
     assert all(Path(item["quarantine"]).read_text() == "preserve" for item in entries)
 
 
+def test_uninstall_removes_empty_managed_app_bundle(tmp_path: Path):
+    module = load("uninstall_empty_parents", ROOT / "installer/uninstall.py")
+    applications = tmp_path / "Applications"
+    executable = applications / "KiKit Packer.app/Contents/MacOS/kikit-packer"
+    plist = applications / "KiKit Packer.app/Contents/Info.plist"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("launcher")
+    plist.write_text("plist")
+    executable.unlink()
+    plist.unlink()
+    module._remove_empty_managed_parents([executable, plist], [applications])
+    assert applications.is_dir()
+    assert not (applications / "KiKit Packer.app").exists()
+
+
 def test_install_rejects_unowned_version_store(tmp_path: Path):
     module = load("install_ownership", ROOT / "installer/install.py")
     root = tmp_path / "install"

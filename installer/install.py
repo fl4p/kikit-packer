@@ -369,6 +369,7 @@ def _install_locked(
         )
         doctor = subprocess.run(
             [str(python), "-m", "kikit_packer", "doctor", "--json"],
+            cwd=staging,
             capture_output=True,
             text=True,
             timeout=60,
@@ -398,6 +399,7 @@ def _install_locked(
                 "-c",
                 "from importlib.resources import files; print(files('kikit_packer').joinpath('resources/smoke.kicad_pcb'))",
             ],
+            cwd=staging,
             capture_output=True,
             text=True,
             check=True,
@@ -409,6 +411,7 @@ def _install_locked(
                 "import pcbnew,sys; b=pcbnew.LoadBoard(sys.argv[1]); raise SystemExit(0 if b and b.GetCopperLayerCount()==2 else 1)",
                 resource,
             ],
+            cwd=staging,
             capture_output=True,
             timeout=30,
             check=False,
@@ -432,6 +435,7 @@ def _install_locked(
         }))
         generation = subprocess.run(
             [str(python), "-m", "kikit_packer", "pack", str(smoke_project)],
+            cwd=smoke_root,
             capture_output=True,
             text=True,
             timeout=120,
@@ -443,6 +447,7 @@ def _install_locked(
             )
         gui_import = subprocess.run(
             [str(python), "-c", "import wx; from kikit_packer.gui.frame import MainFrame"],
+            cwd=staging,
             capture_output=True,
             text=True,
             timeout=30,
@@ -453,6 +458,7 @@ def _install_locked(
         shutil.rmtree(smoke_root)
         installed_version = subprocess.run(
             [str(python), "-c", "import kikit_packer; print(kikit_packer.__version__)"],
+            cwd=staging,
             capture_output=True,
             text=True,
             check=True,
