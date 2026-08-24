@@ -5,7 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from kikit_packer.runner import RunError, _run_child
+from kikit_packer.packing import PlanningError
+from kikit_packer.runner import RunError, _plan_v1_with_cancellation, _run_child
+
+
+def test_planning_cancellation_is_normalized_to_exit_130(monkeypatch):
+    import threading
+
+    cancelled = threading.Event()
+    cancelled.set()
+
+    def interrupted(*_args, **_kwargs):
+        raise PlanningError("packing cancelled")
+
+    monkeypatch.setattr("kikit_packer.runner.plan_v1", interrupted)
+    with pytest.raises(RunError) as caught:
+        _plan_v1_with_cancellation([], [], [], None, None, 1, cancelled)
+    assert caught.value.exit_code == 130
 
 
 def test_child_streams_are_drained_with_strict_tail_limits(tmp_path: Path):

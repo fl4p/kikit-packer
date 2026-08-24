@@ -9,7 +9,6 @@ from ..geometry import planned_substrate_bounds
 _BACKGROUND = wx.Colour(18, 21, 24)
 _BOARD_FILL = wx.Colour(24, 74, 49)
 _BOARD_EDGE = wx.Colour(104, 205, 151)
-_HOLE_FILL = _BACKGROUND
 _PACKING_EDGE = wx.Colour(69, 112, 143)
 _TEXT = wx.Colour(230, 236, 240)
 _MUTED_TEXT = wx.Colour(145, 158, 166)
@@ -76,6 +75,14 @@ def preview_world_bounds(plan: dict[str, Any], instances: list[dict[str, Any]]) 
         max(point[0] for point in points),
         max(point[1] for point in points),
     ]
+
+
+def substrate_rings(instance: dict[str, Any]) -> list[list[list[int]]]:
+    rings = []
+    for polygon in instance["polygons"]:
+        rings.append(polygon["outline"])
+        rings.extend(polygon["holes"])
+    return rings
 
 
 def fit_transform(bounds: list[int], width: int, height: int, padding: int = _PADDING) -> tuple[float, float, float]:
@@ -155,20 +162,21 @@ class Preview(wx.Panel):
         dc.SetPen(wx.Pen(_PACKING_EDGE, 1, wx.PENSTYLE_SHORT_DASH))
         for instance in self.instances:
             dc.DrawRectangle(*self._screen_rect(instance["packing_bounds"]))
+        graphics = wx.GraphicsContext.Create(dc)
+        graphics.SetPen(wx.Pen(_BOARD_EDGE, 1))
+        graphics.SetBrush(wx.Brush(_BOARD_FILL))
         for instance in self.instances:
-            dc.SetPen(wx.Pen(_BOARD_EDGE, 1))
-            dc.SetBrush(wx.Brush(_BOARD_FILL))
-            for polygon in instance["polygons"]:
-                outline = [self._screen_point(point) for point in polygon["outline"]]
-                if len(outline) >= 3:
-                    dc.DrawPolygon(outline)
-                dc.SetPen(wx.Pen(_BOARD_EDGE, 1))
-                dc.SetBrush(wx.Brush(_HOLE_FILL))
-                for ring in polygon["holes"]:
-                    hole = [self._screen_point(point) for point in ring]
-                    if len(hole) >= 3:
-                        dc.DrawPolygon(hole)
-                dc.SetBrush(wx.Brush(_BOARD_FILL))
+            path = graphics.CreatePath()
+            for ring in substrate_rings(instance):
+                if len(ring) < 3:
+                    continue
+                first = self._screen_point(ring[0])
+                path.MoveToPoint(first.x, first.y)
+                for point in ring[1:]:
+                    screen = self._screen_point(point)
+                    path.AddLineToPoint(screen.x, screen.y)
+                path.CloseSubpath()
+            graphics.DrawPath(path, wx.ODDEVEN_RULE)
             left, top, _right, _bottom = instance["substrate_bounds"]
             label_x, label_y = self._screen_point((left, top))
             width_mm, height_mm = instance["size_mm"]

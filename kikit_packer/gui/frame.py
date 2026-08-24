@@ -25,6 +25,8 @@ class MainFrame(wx.Frame):
         self.SetMinSize((1050, 700))
         self.model = ViewModel(project_path=project)
         self.cancel_event = None
+        self.worker_thread = None
+        self.close_pending = False
         self.last_output = None
         self.prepared: tuple | None = None
         self.saved_revision = 0
@@ -199,6 +201,14 @@ class MainFrame(wx.Frame):
         self._on_dirty(event)
 
     def _on_close(self, event):
+        if self.model.busy:
+            event.Veto()
+            if not self.close_pending:
+                self.close_pending = True
+                if self.cancel_event is not None:
+                    self.cancel_event.set()
+                self.status.SetLabel("Cancelling safely before close...")
+            return
         if (
             self.model.revision != self.saved_revision
             and wx.MessageBox("Discard unsaved project changes?", "Unsaved changes", wx.YES_NO | wx.ICON_WARNING)
@@ -206,10 +216,17 @@ class MainFrame(wx.Frame):
         ):
             event.Veto()
             return
-        if self.cancel_event is not None:
-            self.cancel_event.set()
         self._discard_prepared()
         event.Skip()
+
+    def _finish_worker(self):
+        self.worker_thread = None
+        if not self.close_pending:
+            return False
+        self._discard_prepared()
+        self.close_pending = False
+        self.Destroy()
+        return True
 
     def _append_log(self, message):
         self.logs.AppendText(str(message).rstrip() + "\n")
@@ -308,9 +325,21 @@ class MainFrame(wx.Frame):
         }
 
     def _temporary_project(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as handle:
-            yaml.safe_dump(self._project_data(), handle, sort_keys=False)
-            return Path(handle.name)
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                suffix=".yaml",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                path = Path(handle.name)
+                yaml.safe_dump(self._project_data(), handle, sort_keys=False)
+            return path
+        except BaseException:
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
 
     def load_project(self, path):
         from ..config import load_project
@@ -378,6 +407,12 @@ class MainFrame(wx.Frame):
         from ..config import load_project
         from ..runner import prepare_run
 
+        self._discard_prepared()
+        self.preview.set_plan(None)
+        self.model.plan = None
+        if self.model.state != State.DIRTY:
+            self.model.transition(State.DIRTY)
+        project_path = None
         try:
             project_path = self._temporary_project()
             project = load_project(project_path)
@@ -386,28 +421,35 @@ class MainFrame(wx.Frame):
             self._set_busy(True)
             self.status.SetLabel("Validating...")
         except Exception as exc:  # noqa: BLE001
+            if project_path is not None:
+                project_path.unlink(missing_ok=True)
             wx.MessageBox(str(exc), "Validation failed", wx.OK | wx.ICON_ERROR)
             return
 
         def work():
             root = None
+            prepared = None
+            error = None
             try:
                 root, plan, contract = prepare_run(project, cancel_event=self.cancel_event)
-                wx.CallAfter(self._validated, token, (root, plan, contract, project), None)
+                prepared = (root, plan, contract, project)
                 root = None
             except Exception as exc:  # noqa: BLE001
-                wx.CallAfter(self._validated, token, None, exc)
+                error = exc
             finally:
                 if root is not None:
                     shutil.rmtree(root, ignore_errors=True)
                 project_path.unlink(missing_ok=True)
+            wx.CallAfter(self._validated, token, prepared, error)
 
-        threading.Thread(target=work, daemon=True).start()
+        self.worker_thread = threading.Thread(target=work, daemon=True)
+        self.worker_thread.start()
 
     def _validated(self, token, prepared, error):
         if token != self.model.generation_token and prepared is not None:
             shutil.rmtree(prepared[0], ignore_errors=True)
         if token != self.model.generation_token:
+            self._finish_worker()
             return
         self._set_busy(False)
         self.cancel_event = None
@@ -416,14 +458,15 @@ class MainFrame(wx.Frame):
             self.model.transition(State.CANCELLED if cancelled else State.FAILED)
             self.status.SetLabel("Cancelled" if cancelled else "Validation failed")
             self._append_log(error)
-            return
-        assert prepared is not None
-        root, plan, contract, project = prepared
-        if self.model.accept_plan(token, plan):
-            self.prepared = (root, plan, contract, project)
-            self.boards.set_metadata(project, plan)
-            self.preview.set_plan(plan)
-            self.status.SetLabel("Valid: {} instances".format(len(plan["instances"])))
+        else:
+            assert prepared is not None
+            root, plan, contract, project = prepared
+            if self.model.accept_plan(token, plan):
+                self.prepared = (root, plan, contract, project)
+                self.boards.set_metadata(project, plan)
+                self.preview.set_plan(plan)
+                self.status.SetLabel("Valid: {} instances".format(len(plan["instances"])))
+        self._finish_worker()
 
     def _on_generate(self, _event):
         from ..runner import execute_prepared
@@ -457,6 +500,8 @@ class MainFrame(wx.Frame):
                 daemon=True,
             )
             event_thread.start()
+            result = None
+            error = None
             try:
                 result = execute_prepared(
                     project,
@@ -466,17 +511,19 @@ class MainFrame(wx.Frame):
                     contract,
                     cancel_event=self.cancel_event,
                 )
-                wx.CallAfter(self._generated, token, result, None, project.panel.output)
             except Exception as exc:  # noqa: BLE001
-                wx.CallAfter(self._generated, token, None, exc, project.panel.output)
+                error = exc
             finally:
                 event_stop.set()
-                event_thread.join(timeout=1)
+                event_thread.join()
+            wx.CallAfter(self._generated, token, result, error, project.panel.output)
 
-        threading.Thread(target=work, daemon=True).start()
+        self.worker_thread = threading.Thread(target=work, daemon=True)
+        self.worker_thread.start()
 
     def _generated(self, token, result, error, output):
         if token != self.model.generation_token:
+            self._finish_worker()
             return
         self._set_busy(False)
         self.cancel_event = None
@@ -485,13 +532,13 @@ class MainFrame(wx.Frame):
             self.model.transition(State.CANCELLED if cancelled else State.FAILED)
             self.status.SetLabel("Cancelled" if cancelled else "Generation failed")
             self._append_log(error)
-            return
-        if self.model.finish(token, True, f"Generated {output}"):
+        elif self.model.finish(token, True, f"Generated {output}"):
             self.last_output = output
             self.open_button.Enable(True)
             self.preview.set_plan(result["plan"])
             self.status.SetLabel(f"Generated {output}")
             self._append_log("\n".join(result["artifacts"]))
+        self._finish_worker()
 
     def _on_cancel(self, _event):
         if self.cancel_event is not None:

@@ -130,6 +130,31 @@ def _runtime_versions() -> dict[str, str]:
     }
 
 
+def _plan_v1_with_cancellation(
+    instance_ids,
+    source_ids,
+    sizes,
+    max_width,
+    max_height,
+    candidate_limit,
+    cancel_event,
+):
+    try:
+        return plan_v1(
+            instance_ids,
+            source_ids,
+            sizes,
+            max_width,
+            max_height,
+            candidate_limit,
+            cancelled=None if cancel_event is None else cancel_event.is_set,
+        )
+    except PlanningError as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunError("planning cancelled", 130) from exc
+        raise
+
+
 def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     from kikit.common import fakeKiCADGui
 
@@ -201,14 +226,14 @@ def prepare_run(project, candidate_limit: int = 1_048_576, cancel_event=None) ->
             height = max(y + (sizes[i][0] if rotations[i] else sizes[i][1]) for i, (_, y) in enumerate(positions))
             packing = PackingResult((), (0, 0, width, height), 1 << len(sizes), 1 << len(sizes))
         else:
-            packing = plan_v1(
+            packing = _plan_v1_with_cancellation(
                 instance_ids,
                 source_ids,
                 sizes,
                 max_width,
                 max_height,
                 candidate_limit,
-                cancelled=None if cancel_event is None else cancel_event.is_set,
+                cancel_event,
             )
             rotations = [item.rotated for item in packing.placements]
             positions = [(item.x_iu, item.y_iu) for item in packing.placements]
