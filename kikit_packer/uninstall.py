@@ -3,11 +3,18 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
+from .durable import (
+    durable_rename_exclusive,
+    durable_replace,
+    durable_rmdir,
+    durable_rmtree,
+    durable_unlink,
+)
 from .install_lock import installer_lock
 
 RECEIPT_VERSION = 2
@@ -24,12 +31,20 @@ def file_hash(path: Path) -> str:
 
 def atomic_json(path: Path, value: dict) -> None:
     encoded = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
-    temporary = path.with_name("." + path.name + ".tmp")
-    with temporary.open("wb") as handle:
-        handle.write(encoded)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            os.fchmod(handle.fileno(), 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
+        durable_replace(Path(temporary), path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def allowed_external_roots(root: Path):
@@ -73,7 +88,7 @@ def _remove_empty_managed_parents(paths, roots) -> None:
         boundary = max(boundaries, key=lambda value: len(value.parts))
         while parent != boundary:
             try:
-                parent.rmdir()
+                durable_rmdir(parent)
             except FileNotFoundError:
                 pass
             except OSError:
@@ -176,16 +191,16 @@ def _receipt_digest(receipt: dict) -> str:
 
 def _remove_quarantine(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
+        durable_rmtree(path)
     else:
-        path.unlink(missing_ok=True)
+        durable_unlink(path, missing_ok=True)
 
 
 def _finalize_uninstall(root: Path, managed: list[Path]) -> None:
     _remove_empty_managed_parents(managed, allowed_external_roots(root))
     try:
-        (root / "versions").rmdir()
-        root.rmdir()
+        durable_rmdir(root / "versions")
+        durable_rmdir(root)
     except OSError:
         pass
 
@@ -205,7 +220,7 @@ def _restore_quarantined(entries: list[tuple[Path, Path]]) -> None:
             errors.append(RuntimeError(f"uninstall recovery target was recreated: {target}"))
             continue
         try:
-            os.replace(quarantine, target)
+            durable_rename_exclusive(quarantine, target)
         except OSError as exc:
             errors.append(exc)
     if errors:
@@ -269,12 +284,12 @@ def recover_journal(root: Path) -> bool:
                 _remove_quarantine(quarantine)
             except OSError:
                 return True
-        journal_path.unlink(missing_ok=True)
+        durable_unlink(journal_path, missing_ok=True)
         managed = [Path(item["path"]).resolve() for item in receipt["managed_files"]]
         _finalize_uninstall(root, managed)
         return True
     _restore_quarantined(entries)
-    journal_path.unlink(missing_ok=True)
+    durable_unlink(journal_path, missing_ok=True)
     return True
 
 
@@ -318,7 +333,7 @@ def uninstall(root: Path) -> None:
             quarantine = Path(entry["quarantine"])
             if quarantine.exists() or quarantine.is_symlink():
                 raise RuntimeError(f"uninstall quarantine already exists: {quarantine}")
-            os.replace(target, quarantine)
+            durable_rename_exclusive(target, quarantine)
             entry["moved"] = True
             moved.append((target, quarantine))
             atomic_json(journal_path, journal)
@@ -329,7 +344,7 @@ def uninstall(root: Path) -> None:
             raise RuntimeError(
                 f"uninstall failed and recovery was incomplete: {recovery_error}"
             ) from uninstall_error
-        journal_path.unlink(missing_ok=True)
+        durable_unlink(journal_path, missing_ok=True)
         raise
     journal["committed"] = True
     atomic_json(journal_path, journal)
@@ -338,7 +353,7 @@ def uninstall(root: Path) -> None:
             _remove_quarantine(quarantine)
         except OSError:
             return
-    journal_path.unlink(missing_ok=True)
+    durable_unlink(journal_path, missing_ok=True)
     _finalize_uninstall(root, managed)
 
 

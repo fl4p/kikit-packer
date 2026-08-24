@@ -19,6 +19,13 @@ if str(_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SOURCE_ROOT))
 
 installer_lock = importlib.import_module("kikit_packer.install_lock").installer_lock
+_durable = importlib.import_module("kikit_packer.durable")
+durable_makedirs = _durable.durable_makedirs
+durable_replace = _durable.durable_replace
+durable_rmtree = _durable.durable_rmtree
+durable_unlink = _durable.durable_unlink
+fsync_directory = _durable.fsync_directory
+fsync_tree = _durable.fsync_tree
 
 RECEIPT_VERSION = 2
 INSTALL_JOURNAL_VERSION = 2
@@ -175,40 +182,6 @@ def _owned_receipt(root: Path, payload_paths: list[Path]):
     return receipt
 
 
-def fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def durable_makedirs(path: Path) -> None:
-    missing = []
-    current = path
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    path.mkdir(parents=True, exist_ok=True)
-    for created in reversed(missing):
-        fsync_directory(created)
-        fsync_directory(created.parent)
-
-
-def durable_replace(source: Path, target: Path) -> None:
-    os.replace(source, target)
-    fsync_directory(target.parent)
-    if source.parent != target.parent:
-        fsync_directory(source.parent)
-
-
-def durable_unlink(path: Path) -> None:
-    path.unlink()
-    fsync_directory(path.parent)
-
-
 def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
     durable_makedirs(path.parent)
     descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
@@ -227,14 +200,18 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
         raise
 
 
+def promote_staging(staging: Path, final: Path) -> None:
+    fsync_tree(staging)
+    durable_replace(staging, final)
+
+
 def _remove_transaction_path(path: Path) -> None:
     if path.is_symlink():
         raise RuntimeError(f"install transaction path is a symlink: {path}")
     if path.exists():
         if not path.is_dir():
             raise RuntimeError(f"install transaction path is not a directory: {path}")
-        shutil.rmtree(path)
-        fsync_directory(path.parent)
+        durable_rmtree(path)
 
 
 def _backup_record(path: Path, replacement: bytes) -> dict:
@@ -821,7 +798,7 @@ def _install_locked(
             (json.dumps(journal, sort_keys=True, indent=2) + "\n").encode("utf-8"),
             0o600,
         )
-        durable_replace(staging, final)
+        promote_staging(staging, final)
         for path, data, mode in writes:
             atomic_write(path, data, mode)
         journal["phase"] = "committed"

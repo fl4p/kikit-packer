@@ -1,4 +1,5 @@
 import hashlib
+import errno
 import importlib.util
 import json
 from pathlib import Path
@@ -88,7 +89,7 @@ def test_uninstall_rename_failure_restores_every_target(tmp_path: Path, monkeypa
             ],
         },
     )
-    original_replace = module.os.replace
+    original_replace = module.durable_rename_exclusive
     failed = False
 
     def replace(source, destination):
@@ -98,7 +99,7 @@ def test_uninstall_rename_failure_restores_every_target(tmp_path: Path, monkeypa
             raise OSError("injected quarantine failure")
         return original_replace(source, destination)
 
-    monkeypatch.setattr(module.os, "replace", replace)
+    monkeypatch.setattr(module, "durable_rename_exclusive", replace)
     with pytest.raises(OSError, match="injected"):
         module.uninstall(root)
     assert [path.read_text() for path in managed] == ["launcher-a", "launcher-b"]
@@ -395,11 +396,58 @@ def test_staging_creation_failure_replays_initial_journal(tmp_path: Path, monkey
 def test_atomic_install_write_fsyncs_parent_directory(tmp_path: Path, monkeypatch):
     module = load("install_atomic_fsync", ROOT / "installer/install.py")
     calls = []
-    monkeypatch.setattr(module, "fsync_directory", calls.append)
+    monkeypatch.setattr(module._durable, "fsync_directory", calls.append)
     target = tmp_path / "state.json"
     module.atomic_write(target, b"state")
     assert target.read_bytes() == b"state"
     assert tmp_path in calls
+
+
+def test_exclusive_durable_rename_never_replaces_target(tmp_path: Path):
+    module = load("durable_exclusive", ROOT / "kikit_packer/durable.py")
+    source = tmp_path / "quarantine"
+    target = tmp_path / "launcher"
+    source.write_text("owned")
+    target.write_text("replacement")
+    with pytest.raises(OSError) as caught:
+        module.durable_rename_exclusive(source, target)
+    assert caught.value.errno == errno.EEXIST
+    assert source.read_text() == "owned"
+    assert target.read_text() == "replacement"
+
+
+def test_fsync_tree_flushes_nested_files_and_directories(tmp_path: Path, monkeypatch):
+    module = load("durable_tree", ROOT / "kikit_packer/durable.py")
+    root = tmp_path / "staging"
+    nested = root / "venv/lib"
+    nested.mkdir(parents=True)
+    first = root / "pyvenv.cfg"
+    second = nested / "package.py"
+    first.write_text("config")
+    second.write_text("package")
+    (nested / "python").symlink_to(second)
+    files = []
+    directories = []
+    monkeypatch.setattr(module, "_fsync_regular_file", files.append)
+    monkeypatch.setattr(module, "fsync_directory", directories.append)
+    module.fsync_tree(root)
+    assert set(files) == {first, second}
+    assert set(directories) == {root, root / "venv", nested}
+
+
+def test_staging_tree_barrier_precedes_promotion(tmp_path: Path, monkeypatch):
+    module = load("install_promotion_barrier", ROOT / "installer/install.py")
+    staging = tmp_path / "staging"
+    final = tmp_path / "final"
+    calls = []
+    monkeypatch.setattr(module, "fsync_tree", lambda path: calls.append(("fsync", path)))
+    monkeypatch.setattr(
+        module,
+        "durable_replace",
+        lambda source, target: calls.append(("replace", source, target)),
+    )
+    module.promote_staging(staging, final)
+    assert calls == [("fsync", staging), ("replace", staging, final)]
 
 
 def test_same_process_uninstall_restore_rejects_recreated_target(tmp_path: Path):
@@ -411,6 +459,23 @@ def test_same_process_uninstall_restore_rejects_recreated_target(tmp_path: Path)
     with pytest.raises(RuntimeError, match="recreated"):
         module._restore_quarantined([(target, quarantine)])
     assert target.read_text() == "replacement"
+    assert quarantine.read_text() == "owned"
+
+
+def test_uninstall_restore_preserves_collision_created_at_rename(tmp_path: Path, monkeypatch):
+    module = load("uninstall_rename_collision", ROOT / "kikit_packer/uninstall.py")
+    target = tmp_path / "launcher"
+    quarantine = tmp_path / ".launcher.uninstall-123456abcdef"
+    quarantine.write_text("owned")
+
+    def collide(_source, destination):
+        destination.write_text("late replacement")
+        raise FileExistsError(errno.EEXIST, "exists", destination)
+
+    monkeypatch.setattr(module, "durable_rename_exclusive", collide)
+    with pytest.raises(RuntimeError, match="recovery was incomplete"):
+        module._restore_quarantined([(target, quarantine)])
+    assert target.read_text() == "late replacement"
     assert quarantine.read_text() == "owned"
 
 
