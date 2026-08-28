@@ -66,10 +66,14 @@ Create a yaml file listing all your boards you want to combine and how many copi
 
 ```yaml
 boards:
-  - board: debug-probe/debug-probe.kicad_pcb
+  B1: # used to extraced by kikit annotation from the main board file
     qty: 1
-    margin_mm: 2      # default = 1
-  - board: sensor/sensor.kicad_pcb
+    margin: 2mm      # default = 1mm
+  DebugProbe: # not used for idenitification, board in file is extracted
+    qty: 2
+    filename: debug-probe/debug-probe.kicad_pcb
+  Sensor:
+    filename: sensor/sensor.kicad_pcb
     qty: 4
 ```
 
@@ -80,23 +84,12 @@ Then run kikit from shell:
 
 ```shell
 kikit panelize \
-  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; input:probe-and-4sensors.yaml' \
+  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; arg:probe-and-4sensors.yaml' \
     --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
     --cuts 'mousebites' \
     --post 'millradius: 1mm' \
-  sensor.kicad_pcb combined.kicad_pcb
+  main_board.kicad_pcb combined.kicad_pcb
 ```
 
-The main board command line argument (`sensor.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
-the current working directory. Usually the main board file name is one of the the boards from the `.yaml`.
-Or you can set this to an empty reference board that contains all the design constraints for your PCB manufacturer.
-The output board will have the same board setup (DRC etc.) as the main board file.
-
-
-
-
-
-
-
-
-
+The main board command line argument (`main_board.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
+the current working directory. The output board will have the same board setup (DRC etc.) as the main board file.
