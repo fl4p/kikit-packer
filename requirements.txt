@@ -1,2 +1,0 @@
-rectangle-packer
-pyyaml

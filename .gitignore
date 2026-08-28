@@ -17,3 +17,5 @@ fp-info-cache
 venv-ki/bin/
 
 venv-ki/
+build/bdist.win-amd64/
+kicad_packer_plugin.egg-info/

@@ -35,7 +35,7 @@ Create a new virtual environment based on the KiCad one and install requirements
 ```
 PYTHON=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
 ${PYTHON} -m venv --system-site-packages venv-ki
-./venv-ki/bin/pip3 install -r requirements.txt
+./venv-ki/bin/pip3 install .
 ```
 
 ### Install dependencies (Linux)
@@ -51,13 +51,13 @@ Create a new virtual environment:
 ```
 PYTHON=python3
 ${PYTHON} -m venv --system-site-packages venv
-./venv/bin/pip3 install -r requirements.txt
+./venv/bin/pip3 .
 ```
 
 ### Install dependencies (Windows)
 
 ```
-"C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install -r requirements.txt
+"C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install .
 ```
 
 
