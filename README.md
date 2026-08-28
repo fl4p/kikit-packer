@@ -84,7 +84,7 @@ Then run kikit from shell:
 
 ```shell
 kikit panelize \
-  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; arg:probe-and-4sensors.yaml' \
+  --layout 'plugin; code: kikit_packer.Plugin; arg: probe-and-4sensors.yaml' \
     --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
     --cuts 'mousebites' \
     --post 'millradius: 1mm' \
