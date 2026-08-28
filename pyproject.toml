@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kicad-packer-plugin"
+version = "0.1.0"
+description = "KiCad packer layout plugin"
+requires-python = ">=3.7"
+dependencies = [
+    "rectangle-packer",
+    "pyyaml",
+]
+
+[tool.setuptools]
+py-modules = ["kikit_packer"]
