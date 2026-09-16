@@ -2,7 +2,6 @@ import os.path
 from pathlib import Path
 from typing import Any, cast
 
-from kikit.annotations import TabAnnotation
 from kikit.common import KiPoint, shpBBoxBottom, shpBBoxLeft, shpBBoxRight, shpBBoxTop
 from kikit.panelize import Origin, Panel, expandRect, findBoardBoundingBox, pcbnew
 from kikit.plugin import HookPlugin, LayoutPlugin, TabsPlugin
@@ -58,6 +57,41 @@ class FlatEdgeTabs(TabsPlugin):
             out.append((b[1], b[3]) if vertical else (b[0], b[2]))
         return out
 
+    def _bridge(self, start, end):
+        sx, sy = start
+        ex, ey = end
+        half_width = self.width / 2
+        overlap = 1000
+        if sx == ex and sy != ey:
+            step = 1 if ey > sy else -1
+            span = LineString([(sx, sy - step * overlap), (ex, ey + step * overlap)])
+            cuts = [
+                LineString([
+                    (sx + step * half_width, sy),
+                    (sx - step * half_width, sy),
+                ]),
+                LineString([
+                    (ex - step * half_width, ey),
+                    (ex + step * half_width, ey),
+                ]),
+            ]
+        elif sy == ey and sx != ex:
+            step = 1 if ex > sx else -1
+            span = LineString([(sx - step * overlap, sy), (ex + step * overlap, ey)])
+            cuts = [
+                LineString([
+                    (sx, sy - step * half_width),
+                    (sx, sy + step * half_width),
+                ]),
+                LineString([
+                    (ex, ey + step * half_width),
+                    (ex, ey - step * half_width),
+                ]),
+            ]
+        else:
+            raise RuntimeError(f"flat-edge tab is not axial: start={start} end={end}")
+        return span.buffer(half_width, cap_style="flat"), cuts
+
     def buildTabs(self, panel):
         panel.clearTabsAnnotations()
         subs = panel.substrates
@@ -72,6 +106,8 @@ class FlatEdgeTabs(TabsPlugin):
         ]
         counts = [0] * len(subs)
         connections = []
+        bridges = []
+        cuts = []
         for i, s in enumerate(subs):
             for query, side, direction, oppSide in sides:
                 for n, shadow in query(neighbors, s):
@@ -83,9 +119,6 @@ class FlatEdgeTabs(TabsPlugin):
                     edge_n = oppSide(n.bounds())
                     if abs(edge_s.x - edge_n.x) > 4 * self.width:
                         continue
-                    # a tab is only placed where BOTH facing edges are flat and
-                    # outermost, so both ends get a mousebite cut and no stub
-                    # survives depaneling
                     for sec in shadow.intervals:
                         for alo, ahi in self._flatIntervals(s, edge_s, vertical):
                             for blo, bhi in self._flatIntervals(n, edge_n, vertical):
@@ -96,16 +129,32 @@ class FlatEdgeTabs(TabsPlugin):
                                 mid = (lo + hi) / 2
                                 o_s = (edge_s.x, mid) if vertical else (mid, edge_s.x)
                                 o_n = (edge_n.x, mid) if vertical else (mid, edge_n.x)
-                                s.annotations.append(
-                                    TabAnnotation(None, o_s, direction, self.width))
-                                n.annotations.append(TabAnnotation(
-                                    None, o_n, [-direction[0], -direction[1]], self.width))
-                                connections.append({
+                                connection = {
                                     "left": i,
                                     "right": j,
                                     "start": o_s,
                                     "end": o_n,
-                                })
+                                }
+                                centerline = LineString([o_s, o_n])
+                                corridor = centerline.buffer(
+                                    self.width / 2, cap_style="flat"
+                                ).buffer(1000)
+                                touched = {
+                                    instance
+                                    for instance, substrate in enumerate(subs)
+                                    if corridor.intersects(substrate.substrates)
+                                }
+                                expected = {i, j}
+                                if touched != expected:
+                                    raise RuntimeError(
+                                        "flat-edge tab corridor has invalid substrate incidence: "
+                                        f"expected={sorted(expected)} touched={sorted(touched)} "
+                                        f"start={o_s} end={o_n}"
+                                    )
+                                bridge, bridge_cuts = self._bridge(o_s, o_n)
+                                connections.append(connection)
+                                bridges.append(bridge)
+                                cuts.extend(bridge_cuts)
                                 counts[i] += 1
                                 counts[j] += 1
         print('flat-edge tabs per board:', counts)
@@ -116,29 +165,19 @@ class FlatEdgeTabs(TabsPlugin):
                 f"flat-edge tab generator: board(s) {[i for i, c in enumerate(counts) if c == 0]} got no tab (no straight "
                 "outermost edge segment faces a neighbor) — the panel would "
                 "fall apart. Rearrange the layout or add tabs manually.")
-        cuts = panel.buildTabsFromAnnotations(0)
+
+        # KiKit partition lines are a cut plan and may omit valid facing pairs.
+        panel.forwardTabs.extend(bridges)
+        panel.boardSubstrate.union(bridges)
         from shapely.ops import unary_union
 
         material = unary_union(list(panel.forwardTabs))
-        graph = {index: set() for index in range(len(subs))}
+        graph = {instance: set() for instance in range(len(subs))}
         for connection in connections:
             centerline = LineString([connection["start"], connection["end"]])
             if not material.buffer(5000).covers(centerline):
                 raise RuntimeError(
                     "flat-edge tab material does not span its intended substrates: "
-                    f"start={connection['start']} end={connection['end']}"
-                )
-            corridor = centerline.buffer(self.width / 2, cap_style="flat").buffer(1000)
-            touched = {
-                index
-                for index, substrate in enumerate(subs)
-                if corridor.intersects(substrate.substrates)
-            }
-            expected = {connection["left"], connection["right"]}
-            if touched != expected:
-                raise RuntimeError(
-                    "flat-edge tab corridor has invalid substrate incidence: "
-                    f"expected={sorted(expected)} touched={sorted(touched)} "
                     f"start={connection['start']} end={connection['end']}"
                 )
             graph[connection["left"]].add(connection["right"])
