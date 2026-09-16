@@ -27,6 +27,38 @@ from .protocol import (
 from .snapshot import verify_snapshots_from_plan
 
 
+def keep_reference_text(board, originals):
+    """Show each renamed footprint's original reference in place of the new one.
+
+    A reference field is both the designator and the text drawn on silk, so
+    renaming it for uniqueness also rewrites the silkscreen. The visible field is
+    replaced by footprint text with the original name and identical attributes,
+    and hidden. KiKit's bakeRef is not used: it bakes hidden references into
+    visible board text.
+    """
+    for footprint in board.GetFootprints():
+        field = footprint.Reference()
+        original = originals.get(field.GetText())
+        if original is None or original == field.GetText() or not field.IsVisible():
+            continue
+        text = pcbnew.PCB_TEXT(footprint)
+        text.SetAttributes(field)
+        text.SetLayer(field.GetLayer())
+        text.SetPosition(field.GetPosition())
+        text.SetText(original)
+        footprint.Add(text)
+        field.SetVisible(False)
+
+
+def recording_renamer(pattern, originals):
+    def rename(n, orig):
+        renamed = pattern.format(n=n, orig=orig)
+        originals[renamed] = orig
+        return renamed
+
+    return rename
+
+
 class FlatEdgeTabs(TabsPlugin):
     """
     Tab generator that only attaches tabs where a board's outline actually
@@ -222,9 +254,6 @@ class SuppliedPlanPlugin(LayoutPlugin):
         def net_renamer(n, orig):
             return self.netPattern.format(n=n, orig=orig)
 
-        def ref_renamer(n, orig):
-            return self.refPattern.format(n=n, orig=orig)
-
         if plan["authority"]["reference_only"]:
             authority_board = pcbnew.LoadBoard(mainInputFile)
             inherit_reference_authority_rules(panel, authority_board)
@@ -237,6 +266,7 @@ class SuppliedPlanPlugin(LayoutPlugin):
             append = instance["append"]
             rotated = int(append["rotation_deg"]) == 90
             before_uuids = set(fingerprints_by_uuid(panel.board))
+            originals = {}
             with append_compatibility(panel, board):
                 panel.appendBoard(
                     filename=str(filename),
@@ -244,12 +274,13 @@ class SuppliedPlanPlugin(LayoutPlugin):
                     origin=Origin.TopRight if rotated else Origin.TopLeft,
                     sourceArea=box_from_bounds(instance["source_area_iu"]),
                     netRenamer=net_renamer,
-                    refRenamer=ref_renamer,
+                    refRenamer=recording_renamer(self.refPattern, originals),
                     rotationAngle=cast(Any, self.rotation) + pcbnew.EDA_ANGLE((90 if rotated else 0), pcbnew.DEGREES_T),
                     inheritDrc=False,
                     bakeText=bool(plan["resolved_settings"]["project"]["layout"]["bake_text"]),
-                    bakeRef=bool(plan["resolved_settings"]["project"]["layout"]["bake_ref"]),
+                    bakeRef=False,
                 )
+            keep_reference_text(panel.board, originals)
             after_uuids = set(fingerprints_by_uuid(panel.board))
             instance_records.append({
                 "instance_id": instance["instance_id"],
@@ -384,9 +415,6 @@ class Plugin(LayoutPlugin):
         def netRenamer(n, orig):
             return self.netPattern.format(n=n, orig=orig)
 
-        def refRenamer(n, orig):
-            return self.refPattern.format(n=n, orig=orig)
-
         # TODO use math.gcd
         S = int(layout.get("eps", 1))  # scale extents for better numerical stability, not sure if necessary
         assert S > 0, "eps must be a positive integer"
@@ -506,18 +534,20 @@ class Plugin(LayoutPlugin):
                 # defeat the equality check in inheritCopperLayers without
                 # touching the panel board's actual (max) layer count
                 panel.copperLayerCount = layer_counts[i]
+            originals = {}
             panel.appendBoard(
                 filename=filenames[i],
                 destination=KiPoint(int(best_positions[i][0] * S), int(best_positions[i][1] * S)),
                 origin=Origin.TopRight if best_rotates[i] else Origin.TopLeft,
                 sourceArea=expandRect(source_rects[i], 1 * mm),
                 netRenamer=netRenamer,
-                refRenamer=refRenamer,
+                refRenamer=recording_renamer(self.refPattern, originals),
                 rotationAngle=cast(Any, self.rotation) + pcbnew.EDA_ANGLE((90 if best_rotates[i] else 0), pcbnew.DEGREES_T),
                 inheritDrc=False,
                 bakeText=True,
-                bakeRef=bool(layout.get("bakeref", False)),
+                bakeRef=False,
             )
+            keep_reference_text(panel.board, originals)
 
         if ignore_layer_count:
             panel.setCopperLayers(max_layers)
