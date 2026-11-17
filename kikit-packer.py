@@ -66,7 +66,8 @@ VCUT_TOLERANCE = 1000  # 1 um, in KiCad units (nm)
 KIKIT_VCUT_TOLERANCE = 1 * mm  # KiKit only reports cuts deeper than this inside a board
 
 
-def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=True, tol=VCUT_TOLERANCE):
+def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=True, tol=VCUT_TOLERANCE,
+                        extents=None):
     """
     Predict KiKit's V-cuts for boards with outlines `rects` [(x0, y0, x1, y1)]
     and yield the cut lines that cross a board, as
@@ -79,7 +80,11 @@ def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=Tru
     type (left/right, top/bottom). With strict=False only the outermost edges
     count as facing the frame, which is how KiKit often but not always tabs.
     A cut crosses a board if it lies more than `tol` inside it, unless it is
-    that board's own (offset) cut.
+    that board's own (offset) cut. With `extents` (each board's box including
+    parts that stick out of its outline), a cut that only runs under another
+    board's protruding pad or connector counts as crossing too; a board's own
+    cut under its own connector is fine. The depth reported is how far the cut
+    lies inside the board outline, 0 if it only hits a protrusion.
     """
     X0, Y0 = min(r[0] for r in rects), min(r[1] for r in rects)
     X1, Y1 = max(r[2] for r in rects), max(r[3] for r in rects)
@@ -106,11 +111,13 @@ def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=Tru
                                   (top, "y", y0 + offset), (bottom, "y", y1 - offset)):
             if edge:
                 cuts.setdefault((axis, coord), set()).add(i)
+    blocked = extents or rects
     for (axis, c), owners in sorted(cuts.items()):
-        for j, (x0, y0, x1, y1) in enumerate(rects):
-            lo, hi = (x0, x1) if axis == "x" else (y0, y1)
+        for j, ((x0, y0, x1, y1), (bx0, by0, bx1, by1)) in enumerate(zip(rects, blocked)):
+            lo, hi = (bx0, bx1) if axis == "x" else (by0, by1)
             if lo + tol < c < hi - tol and j not in owners:
-                yield axis, c, j, min(c - lo, hi - c)
+                lo, hi = (x0, x1) if axis == "x" else (y0, y1)
+                yield axis, c, j, max(0, min(c - lo, hi - c))
 
 
 def vcut_conflicts(*args, **kwargs):
@@ -140,7 +147,9 @@ def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_heig
     -> bool. A layout that fits is ranked by the first check it passes and is
     dropped if it passes none; the best layout of the best rank wins. With no
     checks every layout that fits is accepted. stats (a dict), if given, gets
-    "fits" (layouts that fit) and "rank" (rank of the result, or None).
+    "fits" (layouts that fit) and "rank" (rank of the result, or None); if it
+    has "candidates" (a list), every layout that fits is appended to it as
+    (turned flags, positions).
 
     Returns (turned flags, positions); both are empty if nothing fits. Among
     equally dense packings the one that turns the least board area away from
@@ -173,6 +182,8 @@ def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_heig
             except PackingImpossibleError:
                 continue
             fits += 1
+            if stats is not None and "candidates" in stats:
+                stats["candidates"].append((rotate, positions))
             density = packing_density(sizes_with_rotations, positions)
             assert density <= 1.0, "unexpected packing density > 1"
             rotated_area = sum(np.array(rotate) * areas)
@@ -503,7 +514,7 @@ class Plugin(LayoutPlugin):
         mode = config_data.get("pack", "vcut" if vcuts else "free")
         if mode not in PACK_MODES:
             raise RuntimeError(f"pack: '{mode}' unknown, use one of {', '.join(PACK_MODES)}")
-        outlines = []  # per copy, per variant: board outline relative to the variant's bbox
+        copy_outlines = []  # per copy, per variant: board outline relative to the variant's bbox
 
         main_board = None
         annotated = []  # (name, area, tolerance) of boards taken from the main file
@@ -559,7 +570,7 @@ class Plugin(LayoutPlugin):
                     x0, y0, x1, y1 = Substrate(rotated_outline(source_board, area, angle)[0]).bounds()
                     outline_offsets.append((x0 - bbox.GetX(), y0 - bbox.GetY(),
                                             x1 - bbox.GetX(), y1 - bbox.GetY()))
-                outlines.extend([outline_offsets] * count)
+                copy_outlines.extend([outline_offsets] * count)
 
             def pack_size(variant):
                 cell = expandRect(variant[1], variant[2])
@@ -585,60 +596,88 @@ class Plugin(LayoutPlugin):
         pack_max_w = int(max_width) // S if max_width is not None else None
         pack_max_h = int(max_height) // S if max_height is not None else None
 
-        framing = self.preset.get("framing", {}).get("type", "none")
-        framed_sides = FRAMED_SIDES.get(framing, (True, True))  # a framing plugin: assume all
+        frame_kind = self.preset.get("framing", {}).get("type", "none")
+        framed_sides = FRAMED_SIDES.get(frame_kind, (True, True))  # a framing plugin: assume all
         offset = int(cuts.get("offset", 0) or 0)
-        if vcuts and offset > KIKIT_VCUT_TOLERANCE:
-            print(f"kikit-packer: the V-cut offset ({offset / mm:g} mm) puts each cut more than 1 mm"
-                  " into its own board; KiKit reports every such cut as an error.")
+        if vcuts and offset > 0:
+            print(f"kikit-packer: the V-cut offset ({offset / mm:g} mm) moves every V-cut that far"
+                  f" into its own board, so each board is scored {offset / mm:g} mm inside its edge."
+                  + (" KiKit reports every cut more than 1 mm inside a board as an error."
+                     if offset > KIKIT_VCUT_TOLERANCE else ""))
 
         def board_rects(rotate, positions):
             # appendBoard puts the rotated bbox `margin` inside its packed cell
             # (same as the placement below); the outline sits at its offset in it.
-            rects = []
+            # Returns the outlines and the bboxes including protruding parts.
+            rects, extents = [], []
             for i, ((x, y), turned) in enumerate(zip(positions, rotate)):
                 v = 1 if turned else 0
-                margin = placements[i][3][v][2]
-                ox0, oy0, ox1, oy1 = outlines[i][v]
+                _, bbox, margin = placements[i][3][v]
+                ox0, oy0, ox1, oy1 = copy_outlines[i][v]
                 x0, y0 = x * S + margin, y * S + margin
                 rects.append((x0 + ox0, y0 + oy0, x0 + ox1, y0 + oy1))
-            return rects
+                extents.append((x0, y0, x0 + bbox.GetWidth(), y0 + bbox.GetHeight()))
+            return rects, extents
+
+        def strict_check(sides):
+            def check(r, p):
+                rects, extents = board_rects(r, p)
+                return vcuts_clear(rects, sides, offset, extents=extents)
+            return check
 
         checks = []
         if vcuts:
-            checks.append(lambda r, p: vcuts_clear(board_rects(r, p), framed_sides, offset))
+            checks.append(strict_check(framed_sides))
             if any(framed_sides):
                 # KiKit often leaves an edge facing the frame across open space
                 # untabbed. If no layout passes the strict check, accept one
                 # that passes when only the outermost edges are tabbed to the
-                # frame, as long as every cut the strict check predicts is deep
-                # enough for KiKit's own check to report it if KiKit does tab
-                # that edge (KiKit ignores cuts up to 1 mm inside a board).
+                # frame, as long as every cut the strict check predicts is more
+                # than 1 mm inside a board outline, so that KiKit's own check
+                # reports it if KiKit does tab that edge (KiKit ignores cuts up
+                # to 1 mm inside a board, and cuts under protruding parts).
                 def loose(r, p):
-                    rects = board_rects(r, p)
-                    return vcuts_clear(rects, framed_sides, offset, strict=False) and all(
+                    rects, extents = board_rects(r, p)
+                    return vcuts_clear(rects, framed_sides, offset, strict=False,
+                                       extents=extents) and all(
                         c[3] > KIKIT_VCUT_TOLERANCE + VCUT_TOLERANCE
-                        for c in iter_vcut_conflicts(rects, framed_sides, offset))
+                        for c in iter_vcut_conflicts(rects, framed_sides, offset, extents=extents))
                 checks.append(loose)
-        stats = {}
+        stats = {"candidates": []} if vcuts and any(framed_sides) else {}
         best_rotates, best_positions = optimal_pack(
             sizes, turned_sizes, groups, max_width=pack_max_w, max_height=pack_max_h,
             mode=mode, accept=checks, stats=stats,
         )
+
+        hint = ""
+        if vcuts and any(framed_sides) and stats["rank"] != 0 and stats["fits"]:
+            # Nothing passes the strict check with this framing: tell which
+            # framing would have a V-cut-safe layout among the same candidates.
+            alternatives = []
+            for kind in ("none", "railstb", "railslr"):
+                if kind == frame_kind:
+                    continue
+                check = strict_check(FRAMED_SIDES[kind])
+                if any(check(r, p) for r, p in stats["candidates"]):
+                    alternatives.append("no framing" if kind == "none" else f"'{kind}'")
+            hint = (f" No V-cut-safe layout with '{frame_kind}'; "
+                    + (f"{' or '.join(alternatives)} would work, or use mouse bites."
+                       if alternatives else "no other framing would help either; use mouse bites."))
+
         if len(best_positions) != len(sizes):
             if vcuts and stats["fits"]:
                 raise RuntimeError(
                     "No layout found whose V-cuts miss every board (a V-cut spans the whole"
-                    " panel). Use --cuts mousebites, or relax max_width/max_height.")
+                    " panel). Use --cuts mousebites, or relax max_width/max_height." + hint)
             raise RuntimeError(
                 "The boards do not fit into max_width x max_height "
                 "(bare numbers are millimetres)"
             )
         if stats["rank"] == 1:
-            print(f"kikit-packer: no layout passes the V-cut check with framing '{framing}';"
+            print(f"kikit-packer: no layout passes the V-cut check with framing '{frame_kind}';"
                   " using one that assumes only the outermost edges are tabbed to the frame."
                   " This relies on KiKit's own V-cut check: if a cut still crosses a board,"
-                  " KiKit reports it, marks it in the output board and exits with code 1.")
+                  " KiKit reports it, marks it in the output board and exits with code 1." + hint)
 
         panel.sourcePaths.add(mainInputFile)
 
