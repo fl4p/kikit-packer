@@ -91,8 +91,14 @@ Per-board keys:
   In a multi-board file, keep the gap between annotated boards larger than `tolerance`: otherwise a
   neighbour's footprints and tracks near the gap are copied too (the packer prints a warning).
 - Lengths must not be negative, and `max_width`/`max_height` must be greater than zero.
+- `rotate`: turn the board before packing, counter-clockwise like KiCad (default `0deg`). Any angle works: the
+  packer reserves the bounding box of the rotated outline. Giving `rotate` fixes the board at that angle.
+- `allow_rotation`: let the packer turn the board by another 90° when that packs denser. Default `true`, but
+  `false` for boards that set `rotate`; set it to `true` explicitly to make `rotate` only the preferred angle.
+  Among equally dense layouts the packer keeps boards at their `rotate` angle.
 
 Lengths take KiKit units (`2mm`, `0.5in`, ...). A bare number is read as millimetres.
+Angles take KiKit units (`90deg`, `0.5rad`). A bare number is read as degrees.
 
 The older list format (`- board: path.kicad_pcb`, `margin_mm: 2`) and the `input:` layout parameter
 still work.

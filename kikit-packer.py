@@ -1,8 +1,8 @@
-from itertools import chain, combinations
+from itertools import chain, combinations, product
 from pathlib import Path
 
 import numpy as np
-from kikit.common import KiPoint
+from kikit.common import KiPoint, collectEdges, findBoundingBox
 from kikit.defs import Layer
 from kikit.panelize import (
     Origin,
@@ -10,10 +10,11 @@ from kikit.panelize import (
     expandRect,
     extractSourceAreaByAnnotation,
     findBoardBoundingBox,
+    getOriginCoord,
     pcbnew,
 )
 from kikit.plugin import LayoutPlugin
-from kikit.units import mm, readLength
+from kikit.units import mm, readAngle, readLength
 from rpack import PackingImpossibleError, pack, packing_density
 
 
@@ -23,13 +24,43 @@ def powerset(iterable):
     return chain.from_iterable(combinations(s, r) for r in range(len(s) + 1))
 
 
-def optimal_pack(sizes, max_width=None, max_height=None):
+def rotation_subsets(groups):
+    """
+    Yield every set of rectangle indices the optimizer may turn by 90deg.
+
+    `groups` lists the indices of interchangeable rectangles (the copies of one
+    board entry); only boards that allow rotation take part. The copies in a
+    group are identical, so only the number of turned copies matters: a group
+    of qty q contributes q+1 choices instead of 2^q.
+    """
+    for counts in product(*(range(len(g) + 1) for g in groups)):
+        yield frozenset(chain.from_iterable(g[:k] for g, k in zip(groups, counts)))
+
+
+def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_height=None):
+    """
+    sizes[i]: (w, h) of rectangle i in its configured orientation.
+    turned_sizes[i]: (w, h) of rectangle i turned by another 90deg, or None if
+    it must keep its orientation. Defaults to the swapped size for all.
+    groups: lists of interchangeable indices (see rotation_subsets). Defaults to
+    one group per rotatable rectangle, i.e. the full powerset.
+
+    Returns (turned flags, positions); both are empty if nothing fits. Among
+    equally dense packings the one that turns the least board area away from
+    the configured orientation wins.
+    """
+    if turned_sizes is None:
+        turned_sizes = [(h, w) for (w, h) in sizes]
+    if groups is None:
+        groups = [[i] for i in range(len(sizes)) if turned_sizes[i] is not None]
+    assert all(turned_sizes[i] is not None for g in groups for i in g)
+
+    areas = np.array([w * h for w, h in sizes])
     best_rotate, best_positions, best_density = (), (), -1
     best_rotated_area = 0
-    for rotated_sizes_indices in powerset(range(len(sizes))):
+    for turned in rotation_subsets(groups):
         sizes_with_rotations = [
-            ((height, width) if i in rotated_sizes_indices else (width, height))
-            for (i, (width, height)) in enumerate(sizes)
+            (turned_sizes[i] if i in turned else sizes[i]) for i in range(len(sizes))
         ]
 
         try:
@@ -40,10 +71,8 @@ def optimal_pack(sizes, max_width=None, max_height=None):
             continue
         density = packing_density(sizes_with_rotations, positions)
         assert density <= 1.0, "unexpected packing density > 1"
-        rotate = [
-            (i in rotated_sizes_indices) for (i, _) in enumerate(sizes_with_rotations)
-        ]
-        rotated_area = sum(np.array(rotate) * np.array(list(w * h for w, h in sizes)))
+        rotate = [(i in turned) for i in range(len(sizes))]
+        rotated_area = sum(np.array(rotate) * areas)
 
         # prefer topologies with less rotational area
         if density > best_density or (
@@ -94,6 +123,48 @@ def read_qty(value, what):
     if qty <= 0:
         raise RuntimeError(f"{what}: qty must be a positive integer, got '{value}'")
     return qty
+
+
+def read_rotation(board_config, what):
+    """
+    Return (rotate, allow_rotation) for a board.
+
+    rotate: a KiKit angle string ("90deg", "0.5rad") or a bare number in
+    degrees; default 0. Counter-clockwise, as in KiCad.
+    allow_rotation: whether the optimizer may turn the board by another 90deg.
+    Defaults to true, but to false when `rotate` is given, so `rotate` on its
+    own fixes the angle.
+    """
+    value = board_config.get("rotate", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise RuntimeError(f"{what} rotate: expected an angle like '90deg' or a number in degrees, got '{value}'")
+    if isinstance(value, str):
+        rotate = pcbnew.EDA_ANGLE(readAngle(value).AsDegrees(), pcbnew.DEGREES_T)
+    else:
+        rotate = pcbnew.EDA_ANGLE(float(value), pcbnew.DEGREES_T)
+    allow_rotation = board_config.get("allow_rotation", "rotate" not in board_config)
+    if not isinstance(allow_rotation, bool):
+        raise RuntimeError(f"{what} allow_rotation: expected true or false, got '{allow_rotation}'")
+    return rotate, allow_rotation
+
+
+def rotated_bbox(board, area, angle):
+    """
+    Bounding box of the board outline inside `area` after rotating it by
+    `angle` about the centre of `area`, the transform appendBoard applies with
+    Origin.Center. Edges are matched against `area` grown by the widest edge
+    line only, so outlines of neighbouring boards in a multi-board source are
+    not picked up.
+    """
+    edges = collectEdges(board, Layer.Edge_Cuts)
+    widest = max((e.GetWidth() for e in edges), default=0)
+    center = getOriginCoord(Origin.Center, area)
+    rotated = []
+    for edge in collectEdges(board, Layer.Edge_Cuts, expandRect(area, widest)):
+        edge = edge.Duplicate()
+        edge.Rotate(center, angle)
+        rotated.append(edge)
+    return findBoundingBox(rotated)
 
 
 def normalize_boards(boards):
@@ -203,8 +274,11 @@ class Plugin(LayoutPlugin):
 
         main_board = None
         annotated = []  # (name, area, tolerance) of boards taken from the main file
-        placements = []  # (filename, sourceArea, margin, tolerance) per copy
-        sizes = []
+        # per copy: (filename, sourceArea, tolerance, variants); variants[0] is
+        # the configured orientation, variants[1] (if allowed) is turned by
+        # another 90deg. A variant is (angle, rotated board bbox, margin).
+        placements = []
+        sizes, turned_sizes, groups = [], [], []
 
         for board_name, board_config in boards:
             what = f"board '{board_name}'"
@@ -216,32 +290,43 @@ class Plugin(LayoutPlugin):
             else:
                 margin = 1 * mm
             tolerance = read_length(board_config.get("tolerance", "1mm"), f"{what} tolerance")
+            rotate, allow_rotation = read_rotation(board_config, what)
 
             if "filename" in board_config:
                 filename = resolve_path(board_config["filename"], config_file)
-                area = findBoardBoundingBox(pcbnew.LoadBoard(str(filename)))
+                source_board = pcbnew.LoadBoard(str(filename))
+                area = findBoardBoundingBox(source_board)
                 print(f"Extracted board {board_name} from {filename}; count: {count}")
             else:
                 if main_board is None:
                     main_board = pcbnew.LoadBoard(mainInputFile)
+                source_board = main_board
                 area = extractSourceAreaByAnnotation(main_board, board_name, layer)
                 filename = mainInputFile
                 print(f"Extracted board reference {board_name}; count: {count}")
 
             # The margin only reserves space around the board in the packing; the
             # extracted area stays tight so that neighbouring boards in a
-            # multi-board source file are not pulled in.
-            cell = expandRect(area, margin)
-            sizes.extend(
-                [
-                    (
-                        -(-int(cell.GetWidth() + self.hspace) // S),
-                        -(-int(cell.GetHeight() + self.vspace) // S),
-                    )
-                ]
-                * count
-            )
-            placements.extend([(filename, area, margin, tolerance)] * count)
+            # multi-board source file are not pulled in. The cell is the
+            # rotated board's bounding box grown by the margin.
+            variants = []
+            for turn in (0, 90) if allow_rotation else (0,):
+                angle = self.rotation + rotate + pcbnew.EDA_ANGLE(turn, pcbnew.DEGREES_T)
+                variants.append((angle, rotated_bbox(source_board, area, angle), margin))
+
+            def pack_size(variant):
+                cell = expandRect(variant[1], variant[2])
+                return (
+                    -(-int(cell.GetWidth() + self.hspace) // S),
+                    -(-int(cell.GetHeight() + self.vspace) // S),
+                )
+
+            first = len(placements)
+            sizes.extend([pack_size(variants[0])] * count)
+            turned_sizes.extend([pack_size(variants[1]) if allow_rotation else None] * count)
+            if allow_rotation:
+                groups.append(list(range(first, first + count)))
+            placements.extend([(filename, area, tolerance, variants)] * count)
             if filename == mainInputFile:
                 annotated.append((board_name, area, tolerance))
 
@@ -252,7 +337,7 @@ class Plugin(LayoutPlugin):
         pack_max_w = int(max_width) // S if max_width is not None else None
         pack_max_h = int(max_height) // S if max_height is not None else None
         best_rotates, best_positions = optimal_pack(
-            sizes, max_width=pack_max_w, max_height=pack_max_h
+            sizes, turned_sizes, groups, max_width=pack_max_w, max_height=pack_max_h
         )
         if len(best_positions) != len(sizes):
             raise RuntimeError(
@@ -265,22 +350,23 @@ class Plugin(LayoutPlugin):
         netRenamer = lambda n, orig: self.netPattern.format(n=n, orig=orig)
         refRenamer = lambda n, orig: self.refPattern.format(n=n, orig=orig)
 
-        for i, (filename, area, margin, tolerance) in enumerate(placements):
-            # The margin is the same on all sides, so the offset of the board
-            # inside its cell does not depend on the rotation.
+        for i, (filename, area, tolerance, variants) in enumerate(placements):
+            angle, bbox, margin = variants[1 if best_rotates[i] else 0]
+            # Rotate about the centre of the source area, then shift so that the
+            # rotated board's bounding box sits `margin` inside its packed cell.
+            center = getOriginCoord(Origin.Center, area)
             panel.appendBoard(
                 filename=filename,
                 destination=KiPoint(
-                    int(best_positions[i][0] * S) + margin,
-                    int(best_positions[i][1] * S) + margin,
+                    int(best_positions[i][0] * S) + margin + center[0] - bbox.GetX(),
+                    int(best_positions[i][1] * S) + margin + center[1] - bbox.GetY(),
                 ),
-                origin=Origin.TopRight if best_rotates[i] else Origin.TopLeft,
+                origin=Origin.Center,
                 sourceArea=area,
                 tolerance=tolerance,
                 netRenamer=netRenamer,
                 refRenamer=refRenamer,
-                rotationAngle=self.rotation
-                + pcbnew.EDA_ANGLE((90 if best_rotates[i] else 0), pcbnew.DEGREES_T),
+                rotationAngle=angle,
                 inheritDrc=False,
                 bakeText=True,
             )
