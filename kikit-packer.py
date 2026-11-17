@@ -1,8 +1,10 @@
+import math
 from itertools import chain, combinations, product
 from pathlib import Path
 
 import numpy as np
-from kikit.common import KiPoint, collectEdges, findBoundingBox
+from kikit.annotations import AnnotationReader
+from kikit.common import KiPoint, collectEdges, collectFootprints, collectItems, findBoundingBox
 from kikit.defs import Layer
 from kikit.panelize import (
     Origin,
@@ -148,23 +150,73 @@ def read_rotation(board_config, what):
     return rotate, allow_rotation
 
 
-def rotated_bbox(board, area, angle):
+def rotate_point(point, center, angle):
+    """Rotate like KiCad's RotatePoint: positive angles turn counter-clockwise on screen (y down)."""
+    a = angle.AsRadians()
+    dx, dy = point.x - center.x, point.y - center.y
+    return (
+        center.x + round(dx * math.cos(a) + dy * math.sin(a)),
+        center.y + round(-dx * math.sin(a) + dy * math.cos(a)),
+    )
+
+
+def rotated_bbox(board, area, angle, tolerance):
     """
-    Bounding box of the board outline inside `area` after rotating it by
-    `angle` about the centre of `area`, the transform appendBoard applies with
-    Origin.Center. Edges are matched against `area` grown by the widest edge
-    line only, so outlines of neighbouring boards in a multi-board source are
-    not picked up.
+    Bounding box of everything appendBoard extracts from `area` after rotating
+    it by `angle` about the centre of `area` (the transform appendBoard applies
+    with Origin.Center).
+
+    Besides the outline this covers footprints, tracks and drawings that
+    stick out of it, e.g. edge connectors, so the packer reserves room for
+    them. Edges are matched against `area` grown by the widest edge line only,
+    so outlines of neighbouring boards in a multi-board source are not picked
+    up. Zones are left out: they are usually drawn larger than the board and
+    clipped when filled. Footprint text and KiKit annotations are left out too.
     """
     edges = collectEdges(board, Layer.Edge_Cuts)
     widest = max((e.GetWidth() for e in edges), default=0)
     center = getOriginCoord(Origin.Center, area)
-    rotated = []
+    rotated_edges = []
     for edge in collectEdges(board, Layer.Edge_Cuts, expandRect(area, widest)):
         edge = edge.Duplicate()
         edge.Rotate(center, angle)
-        rotated.append(edge)
-    return findBoundingBox(rotated)
+        rotated_edges.append(edge)
+    bbox = findBoundingBox(rotated_edges)
+
+    # The same selection appendBoard makes.
+    enlarged = expandRect(area, tolerance + widest)
+    annotations = AnnotationReader.getDefault()
+    boxes = [
+        fp.GetBoundingBox(False, False)
+        for fp in collectFootprints(board.GetFootprints(), enlarged)
+        if not annotations.isAnnotation(fp)
+    ]
+    boxes += [t.GetBoundingBox() for t in collectItems(board.GetTracks(), enlarged)]
+    boxes += [
+        d.GetBoundingBox()
+        for d in collectItems(board.GetDrawings(), enlarged)
+        if d.GetLayer() != Layer.Edge_Cuts
+    ]
+    for box in boxes:
+        # Rotating the corners of an item's box gives a box that covers the
+        # rotated item (exact for multiples of 90deg).
+        corners = [
+            pcbnew.VECTOR2I(x, y)
+            for x in (box.GetLeft(), box.GetRight())
+            for y in (box.GetTop(), box.GetBottom())
+        ]
+        xs, ys = [], []
+        for c in corners:
+            x, y = rotate_point(c, center, angle)
+            xs.append(x)
+            ys.append(y)
+        bbox.Merge(
+            pcbnew.BOX2I(
+                pcbnew.VECTOR2I(min(xs), min(ys)),
+                pcbnew.VECTOR2L(max(xs) - min(xs), max(ys) - min(ys)),
+            )
+        )
+    return bbox
 
 
 def normalize_boards(boards):
@@ -193,6 +245,11 @@ def normalize_boards(boards):
                 raise RuntimeError(f"boards[{i}]: legacy list entries need a 'board:' file path")
             cfg = dict(cfg)
             cfg["filename"] = cfg.pop("board")
+            # The list format accepted (and ignored) `rotate` before it was a
+            # setting; keep the optimizer free to turn these boards so old
+            # configs keep packing as before.
+            if "rotate" in cfg:
+                cfg.setdefault("allow_rotation", True)
             items.append((Path(cfg["filename"]).stem, cfg))
         return items
     raise RuntimeError("'boards' must be a mapping of board names to settings")
@@ -312,7 +369,7 @@ class Plugin(LayoutPlugin):
             variants = []
             for turn in (0, 90) if allow_rotation else (0,):
                 angle = self.rotation + rotate + pcbnew.EDA_ANGLE(turn, pcbnew.DEGREES_T)
-                variants.append((angle, rotated_bbox(source_board, area, angle), margin))
+                variants.append((angle, rotated_bbox(source_board, area, angle, tolerance), margin))
 
             def pack_size(variant):
                 cell = expandRect(variant[1], variant[2])
