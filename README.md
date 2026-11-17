@@ -65,13 +65,37 @@ ${PYTHON} -m venv --system-site-packages venv
 Create a yaml file listing all your boards you want to combine and how many copies you need:
 
 ```yaml
+max_width: 300mm     # optional panel size limits
+max_height: 200mm
 boards:
-  - board: debug-probe/debug-probe.kicad_pcb
+  B1:                # no filename: extracted from the main board file via its kikit:Board annotation B1
     qty: 1
-    margin_mm: 2      # default = 1
-  - board: sensor/sensor.kicad_pcb
+    margin: 2mm      # default = 1mm
+  DebugProbe:        # with filename: the name is only a label, the whole board in the file is used
+    qty: 2
+    filename: debug-probe/debug-probe.kicad_pcb
+  Sensor:
+    filename: sensor/sensor.kicad_pcb
     qty: 4
 ```
+
+Per-board keys:
+
+- `qty`: number of copies (default 1).
+- `filename`: board file to use. Without it, the board name is the reference of a
+  [`kikit:Board` annotation](https://yaqwsx.github.io/KiKit/latest/multiboard/) in the main board file.
+- `margin`: space reserved around each copy in the packing (default `1mm`). It does not enlarge the area
+  extracted from the source board.
+- `tolerance`: how far items may stick out of the board outline and still be included, like KiKit's
+  `source.tolerance` (default `1mm`).
+  In a multi-board file, keep the gap between annotated boards larger than `tolerance`: otherwise a
+  neighbour's footprints and tracks near the gap are copied too (the packer prints a warning).
+- Lengths must not be negative, and `max_width`/`max_height` must be greater than zero.
+
+Lengths take KiKit units (`2mm`, `0.5in`, ...). A bare number is read as millimetres.
+
+The older list format (`- board: path.kicad_pcb`, `margin_mm: 2`) and the `input:` layout parameter
+still work.
 
 Here we name this file `probe-and-4sensors.yaml`.
 File names in the `.yaml` file are relative to the folder where the `.yaml` is stored.
@@ -80,23 +104,12 @@ Then run kikit from shell:
 
 ```shell
 kikit panelize \
-  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; input:probe-and-4sensors.yaml' \
+  --layout 'plugin; code: kikit-packer/kikit-packer.py.Plugin; arg:probe-and-4sensors.yaml' \
     --tabs 'fixed; hwidth: 2mm; vwidth: 2mm' \
     --cuts 'mousebites' \
     --post 'millradius: 1mm' \
-  sensor.kicad_pcb combined.kicad_pcb
+  main_board.kicad_pcb combined.kicad_pcb
 ```
 
-The main board command line argument (`sensor.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
-the current working directory. Usually the main board file name is one of the the boards from the `.yaml`.
-Or you can set this to an empty reference board that contains all the design constraints for your PCB manufacturer.
-The output board will have the same board setup (DRC etc.) as the main board file.
-
-
-
-
-
-
-
-
-
+The main board command line argument (`main_board.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
+the current working directory. The output board will have the same board setup (DRC etc.) as the main board file.
