@@ -87,7 +87,10 @@ Per-board keys:
 - `margin`: space reserved around each copy in the packing (default `1mm`). It does not enlarge the area
   extracted from the source board. Parts that stick out of the outline (edge connectors, pads, tracks,
   graphics, but not zones or footprint text) are packed as part of the board, and the margin is added
-  around them.
+  around them. This keeps boards apart, but KiKit places a frame or rails (`--framing`) from the board
+  outlines plus the framing `vspace`/`hspace` (and `slotwidth` for `tightframe`), so parts sticking out
+  on the outside of the panel can reach into the framing. The packer then prints a warning with the
+  board, the side and the framing setting that clears it. It does not change your framing settings itself.
 - `tolerance`: how far items may stick out of the board outline and still be included, like KiKit's
   `source.tolerance` (default `1mm`).
   In a multi-board file, keep the gap between annotated boards larger than `tolerance`: otherwise a

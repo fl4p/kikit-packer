@@ -289,6 +289,49 @@ def warn_overlapping_extraction(board, annotated):
                 )
 
 
+def framing_overlaps(outlines, extents, framing):
+    """
+    Find parts that stick out of a board into the frame or rails.
+
+    KiKit places the framing from the board outlines and the framing settings,
+    ignoring parts that stick out of an outline: rails and frames start
+    `vspace`/`hspace` beyond the outlines' common bounding box, and a tight
+    frame also fills everything farther than `slotwidth` from an outline.
+    outlines[i] and extents[i] are (x0, y0, x1, y1) of board i's outline and
+    of everything extracted with it, as placed. Yields (board index, side,
+    [(setting, overlap)]) for every side whose parts reach into the framing,
+    naming the setting that would have to grow by `overlap`.
+    """
+    kind = framing.get("type", "none")
+    if kind not in ("railstb", "railslr", "frame", "tightframe") or not outlines:
+        return
+    X0 = min(o[0] for o in outlines)
+    Y0 = min(o[1] for o in outlines)
+    X1 = max(o[2] for o in outlines)
+    Y1 = max(o[3] for o in outlines)
+    hspace, vspace = framing.get("hspace", 0), framing.get("vspace", 0)
+    lr = kind in ("railslr", "frame", "tightframe")
+    tb = kind in ("railstb", "frame", "tightframe")
+    slot = framing.get("slotwidth", 0)
+    for i, ((ox0, oy0, ox1, oy1), (ex0, ey0, ex1, ey1)) in enumerate(zip(outlines, extents)):
+        sides = (
+            ("left", lr, "hspace", (X0 - hspace) - ex0, (ox0 - slot) - ex0),
+            ("top", tb, "vspace", (Y0 - vspace) - ey0, (oy0 - slot) - ey0),
+            ("right", lr, "hspace", ex1 - (X1 + hspace), ex1 - (ox1 + slot)),
+            ("bottom", tb, "vspace", ey1 - (Y1 + vspace), ey1 - (oy1 + slot)),
+        )
+        for side, faces, space, frame_overlap, slot_overlap in sides:
+            if not faces:
+                continue
+            found = []
+            if frame_overlap > 1000:  # more than 1 um
+                found.append((space, frame_overlap))
+            if kind == "tightframe" and slot_overlap > 1000:
+                found.append(("slotwidth", slot_overlap))
+            if found:
+                yield i, side, found
+
+
 class Plugin(LayoutPlugin):
     def buildLayout(self, panel: Panel, mainInputFile: str, _sourceArea):
         layout = self.preset["layout"]
@@ -335,6 +378,7 @@ class Plugin(LayoutPlugin):
         # the configured orientation, variants[1] (if allowed) is turned by
         # another 90deg. A variant is (angle, rotated board bbox, margin).
         placements = []
+        names = []
         sizes, turned_sizes, groups = [], [], []
 
         for board_name, board_config in boards:
@@ -384,6 +428,7 @@ class Plugin(LayoutPlugin):
             if allow_rotation:
                 groups.append(list(range(first, first + count)))
             placements.extend([(filename, area, tolerance, variants)] * count)
+            names.extend([board_name] * count)
             if filename == mainInputFile:
                 annotated.append((board_name, area, tolerance))
 
@@ -426,6 +471,29 @@ class Plugin(LayoutPlugin):
                 rotationAngle=angle,
                 inheritDrc=False,
                 bakeText=True,
+            )
+
+        # Parts sticking out of a board on the outside of the panel can reach
+        # into the frame or rails, which KiKit places from the outlines only.
+        framing = self.preset.get("framing", {})
+        outlines = [sub.bounds() for sub in panel.substrates]
+        extents = []
+        for i, (_, _, _, variants) in enumerate(placements):
+            _, bbox, margin = variants[1 if best_rotates[i] else 0]
+            x0 = int(best_positions[i][0] * S) + margin
+            y0 = int(best_positions[i][1] * S) + margin
+            extents.append((x0, y0, x0 + bbox.GetWidth(), y0 + bbox.GetHeight()))
+        for i, side, found in framing_overlaps(outlines, extents, framing):
+            copy = names[: i + 1].count(names[i])
+            overlap = max(o for _, o in found)
+            fixes = [
+                f"{setting}: {math.ceil((framing.get(setting, 0) + o) / mm * 100) / 100:g}mm"
+                for setting, o in found
+            ]
+            print(
+                f"Warning: board '{names[i]}' (copy {copy}) has parts {overlap / mm:.3g} mm into the "
+                f"{framing['type']} on its {side} side; KiKit places the framing from the board "
+                f"outlines only. To clear it, set at least {' and '.join(fixes)} in --framing."
             )
 
         return panel.substrates
