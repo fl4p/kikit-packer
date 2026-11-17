@@ -60,6 +60,8 @@ ${PYTHON} -m venv --system-site-packages venv
 "C:\Program Files\KiCad\8.0\bin\python.exe" -m pip install -r requirements.txt
 ```
 
+This is for KiCad 8.0, update version number if in the path if needed.
+
 
 ## How to use
 Create a yaml file listing all your boards you want to combine and how many copies you need:

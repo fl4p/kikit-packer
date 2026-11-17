@@ -518,7 +518,8 @@ class Plugin(LayoutPlugin):
 
         # TODO use math.gcd
         # scale extents for better numerical stability, not sure if necessary
-        S = int(layout.get("eps", 1))
+        # board bbox is given in nm, S=1000 means we work with µm precision
+        S = int(layout.get("eps", 1000))
         assert S > 0, "eps must be a positive integer"
 
         # A V-cut is a straight line across the whole panel, so a free packing
