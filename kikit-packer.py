@@ -67,7 +67,7 @@ KIKIT_VCUT_TOLERANCE = 1 * mm  # KiKit only reports cuts deeper than this inside
 
 
 def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=True, tol=VCUT_TOLERANCE,
-                        extents=None):
+                        extents=None, frame_cuts=(False, False)):
     """
     Predict KiKit's V-cuts for boards with outlines `rects` [(x0, y0, x1, y1)]
     and yield the cut lines that cross a board, as
@@ -85,6 +85,13 @@ def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=Tru
     board's protruding pad or connector counts as crossing too; a board's own
     cut under its own connector is fine. The depth reported is how far the cut
     lies inside the board outline, 0 if it only hits a protrusion.
+
+    frame_cuts (vertical, horizontal): KiKit's `frame` framing also cuts the
+    frame corners free, with lines along the outermost board edges (vertical
+    ones at the leftmost and rightmost edge, horizontal ones at the top and
+    bottom edge). These ignore `offset` and do not depend on any tab, so they
+    are checked in strict and non-strict mode alike. Such a line belongs to
+    the boards whose edge it is.
     """
     X0, Y0 = min(r[0] for r in rects), min(r[1] for r in rects)
     X1, Y1 = max(r[2] for r in rects), max(r[3] for r in rects)
@@ -111,6 +118,14 @@ def iter_vcut_conflicts(rects, framed_sides=(False, False), offset=0, strict=Tru
                                   (top, "y", y0 + offset), (bottom, "y", y1 - offset)):
             if edge:
                 cuts.setdefault((axis, coord), set()).add(i)
+    if frame_cuts[0]:
+        for c, k in ((X0, 0), (X1, 2)):
+            cuts.setdefault(("x", c), set()).update(
+                i for i, r in enumerate(rects) if abs(r[k] - c) <= tol)
+    if frame_cuts[1]:
+        for c, k in ((Y0, 1), (Y1, 3)):
+            cuts.setdefault(("y", c), set()).update(
+                i for i, r in enumerate(rects) if abs(r[k] - c) <= tol)
     blocked = extents or rects
     for (axis, c), owners in sorted(cuts.items()):
         for j, ((x0, y0, x1, y1), (bx0, by0, bx1, by1)) in enumerate(zip(rects, blocked)):
@@ -598,6 +613,11 @@ class Plugin(LayoutPlugin):
 
         frame_kind = self.preset.get("framing", {}).get("type", "none")
         framed_sides = FRAMED_SIDES.get(frame_kind, (True, True))  # a framing plugin: assume all
+        # `frame` adds its own corner cuts along the outermost board edges
+        # (KiKit's makeFrame, chosen by the framing's `cuts`: both/v/h/none).
+        frame_cut_kind = self.preset.get("framing", {}).get("cuts", "both")
+        frame_cuts = ((frame_cut_kind in ("both", "v"), frame_cut_kind in ("both", "h"))
+                      if frame_kind == "frame" else (False, False))
         offset = int(cuts.get("offset", 0) or 0)
         if vcuts and offset > 0:
             print(f"kikit-packer: the V-cut offset ({offset / mm:g} mm) moves every V-cut that far"
@@ -619,15 +639,15 @@ class Plugin(LayoutPlugin):
                 extents.append((x0, y0, x0 + bbox.GetWidth(), y0 + bbox.GetHeight()))
             return rects, extents
 
-        def strict_check(sides):
+        def strict_check(sides, frame_cuts=(False, False)):
             def check(r, p):
                 rects, extents = board_rects(r, p)
-                return vcuts_clear(rects, sides, offset, extents=extents)
+                return vcuts_clear(rects, sides, offset, extents=extents, frame_cuts=frame_cuts)
             return check
 
         checks = []
         if vcuts:
-            checks.append(strict_check(framed_sides))
+            checks.append(strict_check(framed_sides, frame_cuts))
             if any(framed_sides):
                 # KiKit often leaves an edge facing the frame across open space
                 # untabbed. If no layout passes the strict check, accept one
@@ -639,7 +659,7 @@ class Plugin(LayoutPlugin):
                 def loose(r, p):
                     rects, extents = board_rects(r, p)
                     return vcuts_clear(rects, framed_sides, offset, strict=False,
-                                       extents=extents) and all(
+                                       extents=extents, frame_cuts=frame_cuts) and all(
                         c[3] > KIKIT_VCUT_TOLERANCE + VCUT_TOLERANCE
                         for c in iter_vcut_conflicts(rects, framed_sides, offset, extents=extents))
                 checks.append(loose)
