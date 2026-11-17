@@ -39,13 +39,70 @@ def rotation_subsets(groups):
         yield frozenset(chain.from_iterable(g[:k] for g, k in zip(groups, counts)))
 
 
-def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_height=None):
+def strip_pack(sizes, axis, max_width=None, max_height=None):
+    """Place all rectangles in one row (axis=0) or one column (axis=1), aligned at the top/left
+    edge. A strip is the simplest layout whose V-cuts never cross another board."""
+    positions, cursor = [], 0
+    for w, h in sizes:
+        positions.append((cursor, 0) if axis == 0 else (0, cursor))
+        cursor += w if axis == 0 else h
+    extent_w = cursor if axis == 0 else max(w for w, _ in sizes)
+    extent_h = cursor if axis == 1 else max(h for _, h in sizes)
+    if (max_width is not None and extent_w > max_width) or (max_height is not None and extent_h > max_height):
+        raise PackingImpossibleError("strip exceeds max_width/max_height", [])
+    return positions
+
+
+def vcut_conflicts(rects, framed, tol, strict=True):
+    """V-cuts are straight lines across the whole panel; KiKit puts one where a tab meets a board edge.
+    Return [(axis, coord, board index)] for each cut line that would cross a board's interior.
+
+    An edge is tabbed if another board lies beyond it with an overlapping span. With no frame, an
+    edge facing only the open panel boundary gets no tab. With a frame or rails, KiKit sometimes tabs
+    an edge to the frame across open area and sometimes not, so strict=True counts every edge and
+    strict=False only edges on the outer boundary of the board group. Calibrated against KiKit 1.8.1:
+    strict=True never accepted a layout KiKit rejected; strict=False can."""
+    def overlap(a0, a1, b0, b1):
+        return min(a1, b1) - max(a0, b0) > tol
+
+    X0, Y0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    X1, Y1 = max(r[2] for r in rects), max(r[3] for r in rects)
+    cuts_x, cuts_y = set(), set()
+    for i, (x0, y0, x1, y1) in enumerate(rects):
+        others = [r for j, r in enumerate(rects) if j != i]
+        frame_x0 = framed and (strict or x0 <= X0 + tol)
+        frame_x1 = framed and (strict or x1 >= X1 - tol)
+        frame_y0 = framed and (strict or y0 <= Y0 + tol)
+        frame_y1 = framed and (strict or y1 >= Y1 - tol)
+        if frame_x0 or any(r[2] <= x0 + tol and overlap(y0, y1, r[1], r[3]) for r in others):
+            cuts_x.add(x0)
+        if frame_x1 or any(r[0] >= x1 - tol and overlap(y0, y1, r[1], r[3]) for r in others):
+            cuts_x.add(x1)
+        if frame_y0 or any(r[3] <= y0 + tol and overlap(x0, x1, r[0], r[2]) for r in others):
+            cuts_y.add(y0)
+        if frame_y1 or any(r[1] >= y1 - tol and overlap(x0, x1, r[0], r[2]) for r in others):
+            cuts_y.add(y1)
+    out = []
+    for i, (x0, y0, x1, y1) in enumerate(rects):
+        out += [('x', c, i) for c in sorted(cuts_x) if x0 + tol < c < x1 - tol]
+        out += [('y', c, i) for c in sorted(cuts_y) if y0 + tol < c < y1 - tol]
+    return out
+
+
+PACK_MODES = ("free", "row", "column", "vcut")
+
+
+def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_height=None,
+                 mode="free", accept=None):
     """
     sizes[i]: (w, h) of rectangle i in its configured orientation.
     turned_sizes[i]: (w, h) of rectangle i turned by another 90deg, or None if
     it must keep its orientation. Defaults to the swapped size for all.
     groups: lists of interchangeable indices (see rotation_subsets). Defaults to
     one group per rotatable rectangle, i.e. the full powerset.
+
+    mode: "free" (rpack), "row" or "column" (one strip), "vcut" (all three).
+    accept(turned flags, positions) can reject a candidate layout.
 
     Returns (turned flags, positions); both are empty if nothing fits. Among
     equally dense packings the one that turns the least board area away from
@@ -57,6 +114,11 @@ def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_heig
         groups = [[i] for i in range(len(sizes)) if turned_sizes[i] is not None]
     assert all(turned_sizes[i] is not None for g in groups for i in g)
 
+    free = lambda sz: pack(sz, max_width=max_width, max_height=max_height)
+    row = lambda sz: strip_pack(sz, 0, max_width, max_height)
+    column = lambda sz: strip_pack(sz, 1, max_width, max_height)
+    packers = {"free": [free], "row": [row], "column": [column], "vcut": [free, row, column]}[mode]
+
     areas = np.array([w * h for w, h in sizes])
     best_rotate, best_positions, best_density = (), (), -1
     best_rotated_area = 0
@@ -65,24 +127,25 @@ def optimal_pack(sizes, turned_sizes=None, groups=None, max_width=None, max_heig
             (turned_sizes[i] if i in turned else sizes[i]) for i in range(len(sizes))
         ]
 
-        try:
-            positions = pack(
-                sizes_with_rotations, max_width=max_width, max_height=max_height
-            )
-        except PackingImpossibleError:
-            continue
-        density = packing_density(sizes_with_rotations, positions)
-        assert density <= 1.0, "unexpected packing density > 1"
         rotate = [(i in turned) for i in range(len(sizes))]
-        rotated_area = sum(np.array(rotate) * areas)
+        for packer in packers:
+            try:
+                positions = packer(sizes_with_rotations)
+            except PackingImpossibleError:
+                continue
+            if accept is not None and not accept(rotate, positions):
+                continue
+            density = packing_density(sizes_with_rotations, positions)
+            assert density <= 1.0, "unexpected packing density > 1"
+            rotated_area = sum(np.array(rotate) * areas)
 
-        # prefer topologies with less rotational area
-        if density > best_density or (
-            density / best_density > (1 - 1e-9) and rotated_area < best_rotated_area
-        ):
-            best_rotate, best_positions, best_density = rotate, positions, density
-            best_rotated_area = rotated_area
-            # print('best', best_rotate, best_positions, best_density)
+            # prefer topologies with less rotational area
+            if density > best_density or (
+                density / best_density > (1 - 1e-9) and rotated_area < best_rotated_area
+            ):
+                best_rotate, best_positions, best_density = rotate, positions, density
+                best_rotated_area = rotated_area
+                # print('best', best_rotate, best_positions, best_density)
 
     return best_rotate, best_positions
 
@@ -438,10 +501,53 @@ class Plugin(LayoutPlugin):
         # Round the limits down (sizes are rounded up) so the panel never exceeds them.
         pack_max_w = int(max_width) // S if max_width is not None else None
         pack_max_h = int(max_height) // S if max_height is not None else None
-        best_rotates, best_positions = optimal_pack(
-            sizes, turned_sizes, groups, max_width=pack_max_w, max_height=pack_max_h
-        )
+
+        # A V-cut is a straight line across the whole panel, so a free packing
+        # usually scores through neighbouring boards (issue #1). With --cuts
+        # vcuts, only accept layouts whose full-length cut lines miss every board.
+        vcuts = self.preset.get("cuts", {}).get("type") == "vcuts"
+        framed = self.preset.get("framing", {}).get("type", "none") != "none"
+        mode = config_data.get("pack", "vcut" if vcuts else "free")
+        if mode not in PACK_MODES:
+            raise RuntimeError(f"pack: '{mode}' unknown, use one of {', '.join(PACK_MODES)}")
+        tol = 1 * mm / S  # the tolerance KiKit's own V-cut validation uses
+
+        def board_rects(rotate, positions):
+            # appendBoard puts the rotated board bbox `margin` inside its cell
+            rects = []
+            for (x, y), turned, (_, _, _, variants) in zip(positions, rotate, placements):
+                _, bbox, margin = variants[1 if turned else 0]
+                x0, y0 = x + margin / S, y + margin / S
+                rects.append((x0, y0, x0 + bbox.GetWidth() / S, y0 + bbox.GetHeight() / S))
+            return rects
+
+        def run(strict):
+            accept = None
+            if vcuts:
+                accept = lambda r, p: not vcut_conflicts(board_rects(r, p), framed, tol, strict)
+            return optimal_pack(sizes, turned_sizes, groups, max_width=pack_max_w,
+                                max_height=pack_max_h, mode=mode, accept=accept)
+
+        def run_unchecked():
+            return optimal_pack(sizes, turned_sizes, groups, max_width=pack_max_w,
+                                max_height=pack_max_h, mode=mode)
+
+        best_rotates, best_positions = run(strict=True)
+        if len(best_positions) != len(sizes) and vcuts and framed:
+            # With a frame the strict check rejects nearly every mixed layout.
+            # Retry assuming KiKit tabs only the outer edges to the frame; KiKit
+            # (>= 1.7) still validates the cuts and refuses a panel if one
+            # crosses a board.
+            best_rotates, best_positions = run(strict=False)
+            if len(best_positions) == len(sizes):
+                print("kikit-packer: no layout passes the strict V-cut check with framing;"
+                      " using one that assumes only outer edges are tabbed to the frame."
+                      " KiKit reports an error if a V-cut still crosses a board.")
         if len(best_positions) != len(sizes):
+            if vcuts and len(run_unchecked()[1]) == len(sizes):
+                raise RuntimeError(
+                    "No layout found whose V-cuts miss every board (a V-cut spans the whole"
+                    " panel). Use --cuts mousebites, or relax max_width/max_height.")
             raise RuntimeError(
                 "The boards do not fit into max_width x max_height "
                 "(bare numbers are millimetres)"

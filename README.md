@@ -125,3 +125,18 @@ kikit panelize \
 
 The main board command line argument (`main_board.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
 the current working directory. The output board will have the same board setup (DRC etc.) as the main board file.
+
+## V-cuts
+
+A V-cut is a straight score line across the whole panel, so a free packing usually cuts boards in
+half ([#1](https://github.com/fl4p/kikit-packer/issues/1)). Mouse bites have no such restriction
+and are the recommended cut type.
+
+With `--cuts vcuts` the packer only accepts layouts in which no V-cut line crosses a board. It
+tries the free packing and a single row or column of boards, each with the rotations the boards
+allow (`rotate` and `allow_rotation` apply here too), and keeps the densest layout that passes. If
+none passes, it stops with an error. A top-level `pack:` key in the `.yaml` file forces one packer:
+`free`, `row`, `column` or `vcut` (all three).
+
+With a frame or rails the check is approximate, because KiKit does not always tab an edge to the
+frame. KiKit 1.7 and later checks the V-cuts itself and refuses a panel whose cuts cross a board.
