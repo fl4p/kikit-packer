@@ -125,3 +125,31 @@ kikit panelize \
 
 The main board command line argument (`main_board.kicad_pcb` here) and output file (`combined.kicad_pcb`) are relative to
 the current working directory. The output board will have the same board setup (DRC etc.) as the main board file.
+
+## V-cuts
+
+A V-cut is a straight score line across the whole panel, so a free packing usually cuts boards in
+half ([#1](https://github.com/fl4p/kikit-packer/issues/1)). Mouse bites have no such restriction
+and are the recommended cut type.
+
+With `--cuts vcuts` the packer only accepts layouts in which no V-cut line runs inside a board
+(beyond 1 µm) or under another board's parts that stick out of its outline (a board's own cut under
+its own edge connector is fine). It tries the free packing and a single row or column of boards, each with the
+rotations the boards allow (`rotate` and `allow_rotation` apply here too), and keeps the densest
+layout that passes. If none passes, it stops with an error. A top-level `pack:` key in the `.yaml`
+file forces one packer: `free`, `row`, `column` or `vcut` (all three).
+
+The check predicts KiKit's cuts: one on every board edge that faces another board or the frame
+(`railstb`: top and bottom edges, `railslr`: left and right edges, `frame`/`tightframe`: all edges),
+moved by the `offset` of `--cuts`. A positive offset moves every cut that far into its own board, so
+the packer prints a warning for it. V-cuts need board edges at multiples of 90°, so other `rotate`
+angles are refused in V-cut mode.
+
+With a frame or rails KiKit does not tab every edge that faces the frame. If no layout passes the
+check, the packer falls back to one that only assumes the outermost edges are tabbed, says so, and
+relies on KiKit's own V-cut check. It also names the framings (no framing, `railstb`, `railslr`)
+under which one of the same layouts would pass the check. The fallback only takes layouts where any cut KiKit might still
+make inside a board is more than 1 mm deep, because KiKit ignores shallower ones and cuts under
+protruding parts. KiKit does not
+stop on a bad cut: it still writes the panel, with the offending cuts drawn on the Margin layer and
+listed as errors, and exits with code 1. Check the exit code.
