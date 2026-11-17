@@ -12,9 +12,8 @@ from kikit.panelize import (
     findBoardBoundingBox,
     pcbnew,
 )
-from kikit.panelize_ui_impl import encodePreset
 from kikit.plugin import LayoutPlugin
-from kikit.units import readLength
+from kikit.units import mm, readLength
 from rpack import PackingImpossibleError, pack, packing_density
 
 
@@ -56,6 +55,7 @@ def optimal_pack(sizes, max_width=None, max_height=None):
 
     return best_rotate, best_positions
 
+
 def resolve_path(filename, reference_file):
     path = Path(filename)
     if not path.is_absolute():
@@ -65,93 +65,166 @@ def resolve_path(filename, reference_file):
         raise RuntimeError("File '{}' does not exist".format(path))
     return path
 
+
+def read_length(value, what):
+    """Read a length: a KiKit unit string ("2mm", "0.5in") or a bare number in mm."""
+    if isinstance(value, bool):
+        raise RuntimeError(f"{what}: expected a length, got '{value}'")
+    if isinstance(value, (int, float)):
+        return int(round(value * mm))
+    if isinstance(value, str):
+        return int(readLength(value))
+    raise RuntimeError(f"{what}: expected a length like '2mm' or a number in mm, got '{value}'")
+
+
+def read_qty(value, what):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise RuntimeError(f"{what}: qty must be a positive integer, got '{value}'")
+    try:
+        qty = int(value)
+    except ValueError:
+        raise RuntimeError(f"{what}: qty must be a positive integer, got '{value}'")
+    if qty <= 0:
+        raise RuntimeError(f"{what}: qty must be a positive integer, got '{value}'")
+    return qty
+
+
+def normalize_boards(boards):
+    """
+    Return the board list as (name, config) pairs.
+
+    Accepts the current format, a mapping of board name to config, and the
+    legacy format, a list of entries with a `board:` file path.
+    """
+    if isinstance(boards, dict):
+        items = []
+        for name, cfg in boards.items():
+            cfg = dict(cfg or {})
+            if "board" in cfg and "filename" not in cfg:
+                cfg["filename"] = cfg.pop("board")
+            items.append((str(name), cfg))
+        return items
+    if isinstance(boards, list):
+        items = []
+        for i, cfg in enumerate(boards):
+            if not isinstance(cfg, dict) or "board" not in cfg:
+                raise RuntimeError(f"boards[{i}]: legacy list entries need a 'board:' file path")
+            cfg = dict(cfg)
+            cfg["filename"] = cfg.pop("board")
+            items.append((Path(cfg["filename"]).stem, cfg))
+        return items
+    raise RuntimeError("'boards' must be a mapping of board names to settings")
+
+
 class Plugin(LayoutPlugin):
     def buildLayout(self, panel: Panel, mainInputFile: str, _sourceArea):
-        if not getattr(self, 'userArg', None):
-            raise RuntimeError("layout.arg is required but not provided or is empty - set it to the packer config file")
-        board = pcbnew.LoadBoard(mainInputFile)
-
         layout = self.preset["layout"]
-        config_file = self.userArg
+
+        # `arg:` is KiKit's standard plugin argument; `input:` is the legacy name.
+        config_file = getattr(self, "userArg", None) or layout.get("input", "")
+        if not config_file:
+            raise RuntimeError(
+                "Specify the packer config file like this: --layout 'plugin; code: ...; arg: boards.yaml'"
+            )
 
         import yaml
 
         with open(config_file, "r") as file:
-            config_data = yaml.safe_load(file)
+            config_data = yaml.safe_load(file) or {}
+
+        # The layer for annotation-based extraction is fixed to Edge.Cuts: upstream
+        # KiKit only honours a custom layer for annotations, not for whole-board
+        # extraction, so a config option could not behave consistently.
+        # see: https://github.com/yaqwsx/KiKit/blob/d1957c535781371db5a2f507f8154d460095f9f1/kikit/panelize_ui_impl.py#L187-L193
+        layer = Layer.Edge_Cuts
 
         max_width = config_data.get("max_width")
         max_height = config_data.get("max_height")
-
-        # upstream only supports when using annotations - not for single board extractions
-        # omit it for now since - in this situation - we can't present a consistent api to users
-        # see: https://github.com/yaqwsx/KiKit/blob/d1957c535781371db5a2f507f8154d460095f9f1/kikit/panelize_ui_impl.py#L187-L193
-        # layer = config_data.get("layer", Layer.Edge_Cuts)
-        layer = Layer.Edge_Cuts
-
         if max_width is not None:
-            max_width = readLength(max_width)
-            print(f"Panel width: {max_width}")
+            max_width = read_length(max_width, "max_width")
+            print(f"Panel max width: {max_width / mm:g} mm")
         if max_height is not None:
-            max_height = readLength(max_height)
-            print(f"Panel height: {max_height}")
+            max_height = read_length(max_height, "max_height")
+            print(f"Panel max height: {max_height / mm:g} mm")
 
-        sourceAreas = []
-        sizes = []
-        filenames = []
+        boards = normalize_boards(config_data.get("boards"))
+        if not boards:
+            raise RuntimeError(f"No boards listed in '{config_file}'")
 
         # TODO use math.gcd
-        S = int(
-            layout.get("eps", 1)
-        )  # scale extents for better numerical stability, not sure if necessary
+        # scale extents for better numerical stability, not sure if necessary
+        S = int(layout.get("eps", 1))
         assert S > 0, "eps must be a positive integer"
 
-        for board_ref, board_config in config_data.get("boards", {}).items():
-            margin = readLength(board_config.get("margin", "1mm"))
-            count = board_config.get("qty", 1)
+        main_board = None
+        placements = []  # (filename, sourceArea, margin, tolerance) per copy
+        sizes = []
+
+        for board_name, board_config in boards:
+            what = f"board '{board_name}'"
+            count = read_qty(board_config.get("qty", 1), what)
+            if "margin" in board_config:
+                margin = read_length(board_config["margin"], f"{what} margin")
+            elif "margin_mm" in board_config:  # legacy key
+                margin = read_length(float(board_config["margin_mm"]), f"{what} margin_mm")
+            else:
+                margin = 1 * mm
+            tolerance = read_length(board_config.get("tolerance", "1mm"), f"{what} tolerance")
 
             if "filename" in board_config:
                 filename = resolve_path(board_config["filename"], config_file)
-                file_board = pcbnew.LoadBoard(filename)
-                bbox = expandRect(findBoardBoundingBox(file_board), margin)
-                filenames.extend([filename] * count)
-                print(f"Extracted board {board_ref} from {filename.relative_to(Path.cwd())}; count: {count}")
+                area = findBoardBoundingBox(pcbnew.LoadBoard(str(filename)))
+                print(f"Extracted board {board_name} from {filename}; count: {count}")
             else:
-                bbox = expandRect(
-                    extractSourceAreaByAnnotation(board, board_ref, layer), margin
-                )
-                filenames.extend([mainInputFile] * count)
-                print(f"Extracted board reference {board_ref}; count: {count}")
+                if main_board is None:
+                    main_board = pcbnew.LoadBoard(mainInputFile)
+                area = extractSourceAreaByAnnotation(main_board, board_name, layer)
+                filename = mainInputFile
+                print(f"Extracted board reference {board_name}; count: {count}")
 
+            # The margin only reserves space around the board in the packing; the
+            # extracted area stays tight so that neighbouring boards in a
+            # multi-board source file are not pulled in.
+            cell = expandRect(area, margin)
             sizes.extend(
                 [
                     (
-                        -(-int(bbox.GetWidth() + self.hspace) // S),
-                        -(-int(bbox.GetHeight() + self.vspace) // S),
+                        -(-int(cell.GetWidth() + self.hspace) // S),
+                        -(-int(cell.GetHeight() + self.vspace) // S),
                     )
                 ]
                 * count
             )
-            sourceAreas.extend([bbox] * count)
+            placements.extend([(filename, area, margin, tolerance)] * count)
 
         pack_max_w = -(-int(max_width) // S) if max_width is not None else None
         pack_max_h = -(-int(max_height) // S) if max_height is not None else None
         best_rotates, best_positions = optimal_pack(
             sizes, max_width=pack_max_w, max_height=pack_max_h
         )
+        if len(best_positions) != len(sizes):
+            raise RuntimeError(
+                "The boards do not fit into max_width x max_height "
+                "(bare numbers are millimetres)"
+            )
 
         panel.sourcePaths.add(mainInputFile)
 
         netRenamer = lambda n, orig: self.netPattern.format(n=n, orig=orig)
         refRenamer = lambda n, orig: self.refPattern.format(n=n, orig=orig)
 
-        for i in range(len(sourceAreas)):
+        for i, (filename, area, margin, tolerance) in enumerate(placements):
+            # The margin is the same on all sides, so the offset of the board
+            # inside its cell does not depend on the rotation.
             panel.appendBoard(
-                filename=filenames[i],
+                filename=filename,
                 destination=KiPoint(
-                    int(best_positions[i][0] * S), int(best_positions[i][1] * S)
+                    int(best_positions[i][0] * S) + margin,
+                    int(best_positions[i][1] * S) + margin,
                 ),
                 origin=Origin.TopRight if best_rotates[i] else Origin.TopLeft,
-                sourceArea=sourceAreas[i],
+                sourceArea=area,
+                tolerance=tolerance,
                 netRenamer=netRenamer,
                 refRenamer=refRenamer,
                 rotationAngle=self.rotation
@@ -159,9 +232,6 @@ class Plugin(LayoutPlugin):
                 inheritDrc=False,
                 bakeText=True,
             )
-
-        # print(best_rotates, best_positions)
-
 
         return panel.substrates
 
