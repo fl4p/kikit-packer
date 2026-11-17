@@ -1,8 +1,10 @@
-max_width: 100
-max_height: 1000
+max_width: 100mm
+max_height: 1000mm
 boards:
-- board: main.kicad_pcb
-  qty: 1
-  margin_mm: 2      # default = 1
-- board: long.kicad_pcb
-  qty: 4
+  Main:
+    filename: main.kicad_pcb
+    qty: 1
+    margin: 2mm      # default = 1mm
+  Long:
+    filename: long.kicad_pcb
+    qty: 4

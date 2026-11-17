@@ -65,17 +65,34 @@ ${PYTHON} -m venv --system-site-packages venv
 Create a yaml file listing all your boards you want to combine and how many copies you need:
 
 ```yaml
+max_width: 300mm     # optional panel size limits
+max_height: 200mm
 boards:
-  B1: # used to extraced by kikit annotation from the main board file
+  B1:                # no filename: extracted from the main board file via its kikit:Board annotation B1
     qty: 1
     margin: 2mm      # default = 1mm
-  DebugProbe: # not used for idenitification, board in file is extracted
+  DebugProbe:        # with filename: the name is only a label, the whole board in the file is used
     qty: 2
     filename: debug-probe/debug-probe.kicad_pcb
   Sensor:
     filename: sensor/sensor.kicad_pcb
     qty: 4
 ```
+
+Per-board keys:
+
+- `qty`: number of copies (default 1).
+- `filename`: board file to use. Without it, the board name is the reference of a
+  [`kikit:Board` annotation](https://yaqwsx.github.io/KiKit/latest/multiboard/) in the main board file.
+- `margin`: space reserved around each copy in the packing (default `1mm`). It does not enlarge the area
+  extracted from the source board.
+- `tolerance`: how far items may stick out of the board outline and still be included, like KiKit's
+  `source.tolerance` (default `1mm`).
+
+Lengths take KiKit units (`2mm`, `0.5in`, ...). A bare number is read as millimetres.
+
+The older list format (`- board: path.kicad_pcb`, `margin_mm: 2`) and the `input:` layout parameter
+still work.
 
 Here we name this file `probe-and-4sensors.yaml`.
 File names in the `.yaml` file are relative to the folder where the `.yaml` is stored.
