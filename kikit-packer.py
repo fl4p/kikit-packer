@@ -66,15 +66,22 @@ def resolve_path(filename, reference_file):
     return path
 
 
-def read_length(value, what):
-    """Read a length: a KiKit unit string ("2mm", "0.5in") or a bare number in mm."""
+def read_length(value, what, positive=False):
+    """
+    Read a length: a KiKit unit string ("2mm", "0.5in") or a bare number in mm.
+    Negative lengths are refused; with positive=True zero is refused too.
+    """
     if isinstance(value, bool):
         raise RuntimeError(f"{what}: expected a length, got '{value}'")
     if isinstance(value, (int, float)):
-        return int(round(value * mm))
-    if isinstance(value, str):
-        return int(readLength(value))
-    raise RuntimeError(f"{what}: expected a length like '2mm' or a number in mm, got '{value}'")
+        length = int(round(value * mm))
+    elif isinstance(value, str):
+        length = int(readLength(value))
+    else:
+        raise RuntimeError(f"{what}: expected a length like '2mm' or a number in mm, got '{value}'")
+    if length < 0 or (positive and length == 0):
+        raise RuntimeError(f"{what}: must be {'greater than zero' if positive else 'zero or more'}, got '{value}'")
+    return length
 
 
 def read_qty(value, what):
@@ -99,6 +106,10 @@ def normalize_boards(boards):
     if isinstance(boards, dict):
         items = []
         for name, cfg in boards.items():
+            if cfg is not None and not isinstance(cfg, dict):
+                raise RuntimeError(
+                    f"board '{name}': expected settings like 'qty: 2', got '{cfg}'"
+                )
             cfg = dict(cfg or {})
             if "board" in cfg and "filename" not in cfg:
                 cfg["filename"] = cfg.pop("board")
@@ -114,6 +125,40 @@ def normalize_boards(boards):
             items.append((Path(cfg["filename"]).stem, cfg))
         return items
     raise RuntimeError("'boards' must be a mapping of board names to settings")
+
+
+def is_board_annotation(footprint):
+    fpid = footprint.GetFPID()
+    return (
+        str(fpid.GetLibNickname()).lower() in ("kikit", "pcm_kikit")
+        and str(fpid.GetLibItemName()).lower() == "board"
+    )
+
+
+def warn_overlapping_extraction(board, annotated):
+    """
+    KiKit extracts everything within `tolerance` of a board's outline. In a
+    multi-board file, a neighbour closer than that contributes its footprints
+    and tracks to the board being extracted. Warn about such neighbours.
+    """
+    areas = {}
+    for fp in board.GetFootprints():
+        if is_board_annotation(fp):
+            ref = fp.GetReference()
+            try:
+                areas[ref] = extractSourceAreaByAnnotation(board, ref, Layer.Edge_Cuts)
+            except RuntimeError:
+                pass  # an annotation not pointing at an outline is not our concern here
+    for name, area, tolerance in annotated:
+        band = expandRect(area, tolerance)
+        for other, other_area in areas.items():
+            if other != name and band.Intersects(other_area):
+                print(
+                    f"Warning: board '{other}' is closer than tolerance "
+                    f"({tolerance / mm:g} mm) to board '{name}'; its footprints and "
+                    f"tracks near the gap may be copied into '{name}'. Increase the "
+                    f"gap or lower '{name}'s tolerance."
+                )
 
 
 class Plugin(LayoutPlugin):
@@ -141,10 +186,10 @@ class Plugin(LayoutPlugin):
         max_width = config_data.get("max_width")
         max_height = config_data.get("max_height")
         if max_width is not None:
-            max_width = read_length(max_width, "max_width")
+            max_width = read_length(max_width, "max_width", positive=True)
             print(f"Panel max width: {max_width / mm:g} mm")
         if max_height is not None:
-            max_height = read_length(max_height, "max_height")
+            max_height = read_length(max_height, "max_height", positive=True)
             print(f"Panel max height: {max_height / mm:g} mm")
 
         boards = normalize_boards(config_data.get("boards"))
@@ -157,6 +202,7 @@ class Plugin(LayoutPlugin):
         assert S > 0, "eps must be a positive integer"
 
         main_board = None
+        annotated = []  # (name, area, tolerance) of boards taken from the main file
         placements = []  # (filename, sourceArea, margin, tolerance) per copy
         sizes = []
 
@@ -196,9 +242,15 @@ class Plugin(LayoutPlugin):
                 * count
             )
             placements.extend([(filename, area, margin, tolerance)] * count)
+            if filename == mainInputFile:
+                annotated.append((board_name, area, tolerance))
 
-        pack_max_w = -(-int(max_width) // S) if max_width is not None else None
-        pack_max_h = -(-int(max_height) // S) if max_height is not None else None
+        if annotated:
+            warn_overlapping_extraction(main_board, annotated)
+
+        # Round the limits down (sizes are rounded up) so the panel never exceeds them.
+        pack_max_w = int(max_width) // S if max_width is not None else None
+        pack_max_h = int(max_height) // S if max_height is not None else None
         best_rotates, best_positions = optimal_pack(
             sizes, max_width=pack_max_w, max_height=pack_max_h
         )

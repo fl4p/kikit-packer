@@ -88,6 +88,9 @@ Per-board keys:
   extracted from the source board.
 - `tolerance`: how far items may stick out of the board outline and still be included, like KiKit's
   `source.tolerance` (default `1mm`).
+  In a multi-board file, keep the gap between annotated boards larger than `tolerance`: otherwise a
+  neighbour's footprints and tracks near the gap are copied too (the packer prints a warning).
+- Lengths must not be negative, and `max_width`/`max_height` must be greater than zero.
 
 Lengths take KiKit units (`2mm`, `0.5in`, ...). A bare number is read as millimetres.
 
